@@ -891,6 +891,8 @@ check_publisher(const struct LogicalRepInfo *dbinfo)
 	{
 		PQExpBuffer str = createPQExpBuffer();
 		char	   *psn_esc = PQescapeLiteral(conn, primary_slot_name, strlen(primary_slot_name));
+		int			ntuples;
+		int			count = 0;
 
 		appendPQExpBuffer(str,
 						  "SELECT 1 FROM pg_catalog.pg_replication_slots "
@@ -901,25 +903,38 @@ check_publisher(const struct LogicalRepInfo *dbinfo)
 
 		pg_log_debug("command is: %s", str->data);
 
-		res = PQexec(conn, str->data);
-		if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		/*
+		 * The replication slot might take some time to be active, try a few
+		 * times if necessary.
+		 */
+		do
 		{
-			pg_log_error("could not obtain replication slot information: %s",
-						 PQresultErrorMessage(res));
-			disconnect_database(conn, true);
-		}
+			res = PQexec(conn, str->data);
+			if (PQresultStatus(res) != PGRES_TUPLES_OK)
+			{
+				pg_log_error("could not obtain replication slot information: %s",
+							 PQresultErrorMessage(res));
+				disconnect_database(conn, true);
+			}
 
-		if (PQntuples(res) != 1)
+			ntuples = PQntuples(res);
+			PQclear(res);
+
+			if (ntuples == 1)	/* replication slot is already active */
+				break;
+			else
+				count++;
+		} while (count > NUM_ATTEMPTS);
+
+		if (ntuples != 1)
 		{
 			pg_log_error("could not obtain replication slot information: got %d rows, expected %d row",
-						 PQntuples(res), 1);
+						 ntuples, 1);
 			disconnect_database(conn, true);
 		}
 		else
 			pg_log_info("primary has replication slot \"%s\"",
 						primary_slot_name);
-
-		PQclear(res);
 	}
 
 	disconnect_database(conn, false);

@@ -1349,6 +1349,19 @@ start_standby_server(const struct CreateSubscriberOptions *opt, bool restricted_
 	if (opt->config_file != NULL)
 		appendPQExpBuffer(pg_ctl_cmd, " -o \"-c config_file=%s\"",
 						  opt->config_file);
+
+	/*
+	 * We set up some recovery parameters in the middle part of the
+	 * pg_createsubscriber to ensure all changes are caught up. At that time,
+	 * primary_conninfo will be set without the dbname attribute. Basically, it
+	 * works well, but if the slot sync is enabled, the slot sync worker will
+	 * exit with ERROR because the process requires dbname within
+	 * primary_conninfo. To avoid the error, we override sync_replication_slots
+	 * to off. The synchronization won't happen after the conversion, so it is
+	 * acceptable to stop here as well.
+	 */
+	appendPQExpBuffer(pg_ctl_cmd, " -o \"-c sync_replication_slots=off\"");
+
 	pg_log_debug("pg_ctl command is: %s", pg_ctl_cmd->data);
 	rc = system(pg_ctl_cmd->data);
 	pg_ctl_status(pg_ctl_cmd->data, rc);

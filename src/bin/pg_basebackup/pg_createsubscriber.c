@@ -74,6 +74,7 @@ static PGconn *connect_database(const char *conninfo, bool exit_on_error);
 static void disconnect_database(PGconn *conn, bool exit_on_error);
 static uint64 get_primary_sysid(const char *conninfo);
 static uint64 get_standby_sysid(const char *datadir);
+static void log_if_not_dry_run(const char *format,...) pg_attribute_printf(1, 2);
 static void modify_subscriber_sysid(const struct CreateSubscriberOptions *opt);
 static bool server_is_in_recovery(PGconn *conn);
 static char *generate_object_name(PGconn *conn);
@@ -161,7 +162,7 @@ cleanup_objects_atexit(void)
 	 * again. Warn the user that a new replication setup should be done before
 	 * trying again.
 	 */
-	if (recovery_ended)
+	if (recovery_ended && !dry_run)
 	{
 		pg_log_warning("failed after the end of recovery");
 		pg_log_warning_hint("The target server cannot be used as a physical replica anymore.  "
@@ -190,13 +191,13 @@ cleanup_objects_atexit(void)
 				 * that some objects were left on primary and should be
 				 * removed before trying again.
 				 */
-				if (dbinfo[i].made_publication)
+				if (dbinfo[i].made_publication && !dry_run)
 				{
 					pg_log_warning("publication \"%s\" in database \"%s\" on primary might be left behind",
 								   dbinfo[i].pubname, dbinfo[i].dbname);
 					pg_log_warning_hint("Consider dropping this publication before trying again.");
 				}
-				if (dbinfo[i].made_replslot)
+				if (dbinfo[i].made_replslot && !dry_run)
 				{
 					pg_log_warning("replication slot \"%s\" in database \"%s\" on primary might be left behind",
 								   dbinfo[i].replslotname, dbinfo[i].dbname);
@@ -611,6 +612,22 @@ get_standby_sysid(const char *datadir)
 }
 
 /*
+ * Put the message if we are not in dry_run mode
+ */
+static void
+log_if_not_dry_run(const char *format,...)
+{
+	va_list		ap;
+
+	if (dry_run)
+		return;
+
+	va_start(ap, format);
+	pg_log_generic_v(PG_LOG_INFO, PG_LOG_PRIMARY, format, ap);
+	va_end(ap);
+}
+
+/*
  * Modify the system identifier. Since a standby server preserves the system
  * identifier, it makes sense to change it to avoid situations in which WAL
  * files from one of the systems might be used in the other one.
@@ -624,7 +641,7 @@ modify_subscriber_sysid(const struct CreateSubscriberOptions *opt)
 
 	char	   *cmd_str;
 
-	pg_log_info("modifying system identifier of subscriber");
+	log_if_not_dry_run("modifying system identifier of subscriber");
 
 	cf = get_controlfile(subscriber_dir, &crc_ok);
 	if (!crc_ok)
@@ -643,10 +660,10 @@ modify_subscriber_sysid(const struct CreateSubscriberOptions *opt)
 	if (!dry_run)
 		update_controlfile(subscriber_dir, cf, true);
 
-	pg_log_info("system identifier is %llu on subscriber",
-				(unsigned long long) cf->system_identifier);
+	log_if_not_dry_run("system identifier is %llu on subscriber",
+					   (unsigned long long) cf->system_identifier);
 
-	pg_log_info("running pg_resetwal on the subscriber");
+	log_if_not_dry_run("running pg_resetwal on the subscriber");
 
 	cmd_str = psprintf("\"%s\" -D \"%s\" > \"%s\"", pg_resetwal_path,
 					   subscriber_dir, DEVNULL);
@@ -762,10 +779,10 @@ setup_publisher(struct LogicalRepInfo *dbinfo)
 		if (lsn)
 			pg_free(lsn);
 		lsn = create_logical_replication_slot(conn, &dbinfo[i]);
-		if (lsn != NULL || dry_run)
+		if (lsn != NULL)
 			pg_log_info("create replication slot \"%s\" on publisher",
 						dbinfo[i].replslotname);
-		else
+		else if (!dry_run)
 			exit(1);
 
 		disconnect_database(conn, false);
@@ -1268,8 +1285,8 @@ create_logical_replication_slot(PGconn *conn, struct LogicalRepInfo *dbinfo)
 
 	Assert(conn != NULL);
 
-	pg_log_info("creating the replication slot \"%s\" on database \"%s\"",
-				slot_name, dbinfo->dbname);
+	log_if_not_dry_run("creating the replication slot \"%s\" on database \"%s\"",
+					   slot_name, dbinfo->dbname);
 
 	slot_name_esc = PQescapeLiteral(conn, slot_name, strlen(slot_name));
 
@@ -1316,8 +1333,8 @@ drop_replication_slot(PGconn *conn, struct LogicalRepInfo *dbinfo,
 
 	Assert(conn != NULL);
 
-	pg_log_info("dropping the replication slot \"%s\" on database \"%s\"",
-				slot_name, dbinfo->dbname);
+	log_if_not_dry_run("dropping the replication slot \"%s\" on database \"%s\"",
+					   slot_name, dbinfo->dbname);
 
 	slot_name_esc = PQescapeLiteral(conn, slot_name, strlen(slot_name));
 
@@ -1531,8 +1548,11 @@ wait_for_end_recovery(const char *conninfo, const struct CreateSubscriberOptions
 	if (status == POSTMASTER_STILL_STARTING)
 		pg_fatal("server did not end recovery");
 
-	pg_log_info("target server reached the consistent state");
-	pg_log_info_hint("If pg_createsubscriber fails after this point, you must recreate the physical replica before continuing.");
+	if (!dry_run)
+	{
+		pg_log_info("target server reached the consistent state");
+		pg_log_info_hint("If pg_createsubscriber fails after this point, you must recreate the physical replica before continuing.");
+	}
 }
 
 /*
@@ -1581,8 +1601,8 @@ create_publication(PGconn *conn, struct LogicalRepInfo *dbinfo)
 	PQclear(res);
 	resetPQExpBuffer(str);
 
-	pg_log_info("creating publication \"%s\" on database \"%s\"",
-				dbinfo->pubname, dbinfo->dbname);
+	log_if_not_dry_run("creating publication \"%s\" on database \"%s\"",
+					   dbinfo->pubname, dbinfo->dbname);
 
 	appendPQExpBuffer(str, "CREATE PUBLICATION %s FOR ALL TABLES",
 					  ipubname_esc);
@@ -1623,8 +1643,8 @@ drop_publication(PGconn *conn, struct LogicalRepInfo *dbinfo)
 
 	pubname_esc = PQescapeIdentifier(conn, dbinfo->pubname, strlen(dbinfo->pubname));
 
-	pg_log_info("dropping publication \"%s\" on database \"%s\"",
-				dbinfo->pubname, dbinfo->dbname);
+	log_if_not_dry_run("dropping publication \"%s\" on database \"%s\"",
+					   dbinfo->pubname, dbinfo->dbname);
 
 	appendPQExpBuffer(str, "DROP PUBLICATION %s", pubname_esc);
 
@@ -1683,8 +1703,8 @@ create_subscription(PGconn *conn, const struct LogicalRepInfo *dbinfo)
 	pubconninfo_esc = PQescapeLiteral(conn, dbinfo->pubconninfo, strlen(dbinfo->pubconninfo));
 	replslotname_esc = PQescapeLiteral(conn, dbinfo->replslotname, strlen(dbinfo->replslotname));
 
-	pg_log_info("creating subscription \"%s\" on database \"%s\"",
-				dbinfo->subname, dbinfo->dbname);
+	log_if_not_dry_run("creating subscription \"%s\" on database \"%s\"",
+					   dbinfo->subname, dbinfo->dbname);
 
 	appendPQExpBuffer(str,
 					  "CREATE SUBSCRIPTION %s CONNECTION %s PUBLICATION %s "
@@ -1780,8 +1800,8 @@ set_replication_progress(PGconn *conn, const struct LogicalRepInfo *dbinfo, cons
 	 */
 	originname = psprintf("pg_%u", suboid);
 
-	pg_log_info("setting the replication progress (node name \"%s\" ; LSN %s) on database \"%s\"",
-				originname, lsnstr, dbinfo->dbname);
+	log_if_not_dry_run("setting the replication progress (node name \"%s\" ; LSN %s) on database \"%s\"",
+					   originname, lsnstr, dbinfo->dbname);
 
 	resetPQExpBuffer(str);
 	appendPQExpBuffer(str,
@@ -1826,8 +1846,8 @@ enable_subscription(PGconn *conn, const struct LogicalRepInfo *dbinfo)
 
 	subname = PQescapeIdentifier(conn, dbinfo->subname, strlen(dbinfo->subname));
 
-	pg_log_info("enabling subscription \"%s\" on database \"%s\"",
-				dbinfo->subname, dbinfo->dbname);
+	log_if_not_dry_run("enabling subscription \"%s\" on database \"%s\"",
+					   dbinfo->subname, dbinfo->dbname);
 
 	appendPQExpBuffer(str, "ALTER SUBSCRIPTION %s ENABLE", subname);
 

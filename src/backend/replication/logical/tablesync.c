@@ -957,7 +957,7 @@ fetch_remote_table_info(char *nspname, char *relname,
 					 "   AND a.attrelid = %u"
 					 " ORDER BY a.attnum",
 					 lrel->remoteid,
-					 (walrcv_server_version(LogRepWorkerWalRcvConn) >= 120000 ?
+					 (walrcv_server_version(LogRepWorkerWalRcvConn) >= 120000 && !MySubscription->generatedcolumn?
 					  "AND a.attgenerated = ''" : ""),
 					 lrel->remoteid);
 	res = walrcv_exec(LogRepWorkerWalRcvConn, cmd.data,

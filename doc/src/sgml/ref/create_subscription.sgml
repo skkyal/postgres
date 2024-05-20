@@ -439,7 +439,6 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
          </para>
 
          <para>
-          This parameter can only be set true if copy_data is set to false.
           This option works fine when a generated column (in publisher) is replicated to a
           non-generated column (in subscriber). Else if it is replicated to a generated
           column, it will ignore the replicated data and fill the column with computed or

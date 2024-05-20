@@ -72,6 +72,7 @@
 #define SUBOPT_FAILOVER				0x00002000
 #define SUBOPT_LSN					0x00004000
 #define SUBOPT_ORIGIN				0x00008000
+#define SUBOPT_INCLUDE_GENERATED_COLUMNS		0x00010000
 
 /* check if the 'val' has 'bits' set */
 #define IsSet(val, bits)  (((val) & (bits)) == (bits))
@@ -99,6 +100,7 @@ typedef struct SubOpts
 	bool		failover;
 	char	   *origin;
 	XLogRecPtr	lsn;
+	bool		include_generated_columns;
 } SubOpts;
 
 static List *fetch_table_list(WalReceiverConn *wrconn, List *publications);
@@ -161,6 +163,8 @@ parse_subscription_options(ParseState *pstate, List *stmt_options,
 		opts->failover = false;
 	if (IsSet(supported_opts, SUBOPT_ORIGIN))
 		opts->origin = pstrdup(LOGICALREP_ORIGIN_ANY);
+	if (IsSet(supported_opts, SUBOPT_INCLUDE_GENERATED_COLUMNS))
+		opts->include_generated_columns = false;
 
 	/* Parse options */
 	foreach(lc, stmt_options)
@@ -366,6 +370,15 @@ parse_subscription_options(ParseState *pstate, List *stmt_options,
 			opts->specified_opts |= SUBOPT_LSN;
 			opts->lsn = lsn;
 		}
+		else if (IsSet(supported_opts, SUBOPT_INCLUDE_GENERATED_COLUMNS) &&
+				 strcmp(defel->defname, "include_generated_columns") == 0)
+		{
+			if (IsSet(opts->specified_opts, SUBOPT_INCLUDE_GENERATED_COLUMNS))
+				errorConflictingDefElem(defel, pstate);
+
+			opts->specified_opts |= SUBOPT_INCLUDE_GENERATED_COLUMNS;
+			opts->include_generated_columns = defGetBoolean(defel);
+		}
 		else
 			ereport(ERROR,
 					(errcode(ERRCODE_SYNTAX_ERROR),
@@ -445,6 +458,20 @@ parse_subscription_options(ParseState *pstate, List *stmt_options,
 						 errmsg("subscription with %s must also set %s",
 								"slot_name = NONE", "create_slot = false")));
 		}
+	}
+
+	/*
+	 * Do additional checking for disallowed combination when copy_data and
+	 * include_generated_columns are true. COPY of generated columns is not supported
+	 * yet.
+	 */
+	if (opts->copy_data && opts->include_generated_columns)
+	{
+		ereport(ERROR,
+				errcode(ERRCODE_SYNTAX_ERROR),
+		/*- translator: both %s are strings of the form "option = value" */
+					errmsg("%s and %s are mutually exclusive options",
+						"copy_data = true", "include_generated_columns = true"));
 	}
 }
 
@@ -603,7 +630,8 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 					  SUBOPT_SYNCHRONOUS_COMMIT | SUBOPT_BINARY |
 					  SUBOPT_STREAMING | SUBOPT_TWOPHASE_COMMIT |
 					  SUBOPT_DISABLE_ON_ERR | SUBOPT_PASSWORD_REQUIRED |
-					  SUBOPT_RUN_AS_OWNER | SUBOPT_FAILOVER | SUBOPT_ORIGIN);
+					  SUBOPT_RUN_AS_OWNER | SUBOPT_FAILOVER | SUBOPT_ORIGIN |
+					  SUBOPT_INCLUDE_GENERATED_COLUMNS);
 	parse_subscription_options(pstate, stmt->options, supported_opts, &opts);
 
 	/*
@@ -723,6 +751,7 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 		publicationListToArray(publications);
 	values[Anum_pg_subscription_suborigin - 1] =
 		CStringGetTextDatum(opts.origin);
+	values[Anum_pg_subscription_subincludegencols - 1] = BoolGetDatum(opts.include_generated_columns);
 
 	tup = heap_form_tuple(RelationGetDescr(rel), values, nulls);
 

@@ -598,6 +598,10 @@ libpqrcv_startstreaming(WalReceiverConn *conn,
 			appendStringInfo(&cmd, ", origin '%s'",
 							 options->proto.logical.origin);
 
+		if (options->proto.logical.include_generated_columns &&
+			PQserverVersion(conn->streamConn) >= 170000)
+			appendStringInfoString(&cmd, ", include_generated_columns 'true'");
+
 		pubnames = options->proto.logical.publication_names;
 		pubnames_str = stringlist_to_identifierstr(conn->streamConn, pubnames);
 		if (!pubnames_str)

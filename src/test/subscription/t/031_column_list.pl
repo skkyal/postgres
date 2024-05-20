@@ -1202,7 +1202,7 @@ $result = $node_publisher->safe_psql(
 is( $result, qq(t
 t), 'check the number of columns in the old tuple');
 
-# TEST: Generated and dropped columns are not considered for the column list.
+# TEST: Dropped columns are not considered for the column list.
 # So, the publication having a column list except for those columns and a
 # publication without any column (aka all columns as part of the columns
 # list) are considered to have the same column list.
@@ -1211,7 +1211,7 @@ $node_publisher->safe_psql(
 	CREATE TABLE test_mix_4 (a int PRIMARY KEY, b int, c int, d int GENERATED ALWAYS AS (a + 1) STORED);
 	ALTER TABLE test_mix_4 DROP COLUMN c;
 
-	CREATE PUBLICATION pub_mix_7 FOR TABLE test_mix_4 (a, b);
+	CREATE PUBLICATION pub_mix_7 FOR TABLE test_mix_4 (a, b, d);
 	CREATE PUBLICATION pub_mix_8 FOR TABLE test_mix_4;
 
 	-- initial data

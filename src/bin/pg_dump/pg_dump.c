@@ -4739,6 +4739,7 @@ getSubscriptions(Archive *fout)
 	int			i_suboriginremotelsn;
 	int			i_subenabled;
 	int			i_subfailover;
+	int         		i_subincludegencols;
 	int			i,
 				ntups;
 
@@ -4769,7 +4770,6 @@ getSubscriptions(Archive *fout)
 						 " s.subowner,\n"
 						 " s.subconninfo, s.subslotname, s.subsynccommit,\n"
 						 " s.subpublications,\n");
-
 	if (fout->remoteVersion >= 140000)
 		appendPQExpBufferStr(query, " s.subbinary,\n");
 	else
@@ -4804,18 +4804,23 @@ getSubscriptions(Archive *fout)
 
 	if (dopt->binary_upgrade && fout->remoteVersion >= 170000)
 		appendPQExpBufferStr(query, " o.remote_lsn AS suboriginremotelsn,\n"
-							 " s.subenabled,\n");
+							" s.subenabled,\n");
 	else
 		appendPQExpBufferStr(query, " NULL AS suboriginremotelsn,\n"
 							 " false AS subenabled,\n");
 
 	if (fout->remoteVersion >= 170000)
 		appendPQExpBufferStr(query,
-							 " s.subfailover\n");
+							 " s.subfailover,\n");
 	else
 		appendPQExpBuffer(query,
-						  " false AS subfailover\n");
-
+						" false AS subfailover,\n");
+	if (fout->remoteVersion >= 170000)
+		appendPQExpBufferStr(query,
+						 " s.subincludegencols\n");
+	else
+		appendPQExpBufferStr(query,
+						" false AS subincludegencols,\n");
 	appendPQExpBufferStr(query,
 						 "FROM pg_subscription s\n");
 
@@ -4854,6 +4859,7 @@ getSubscriptions(Archive *fout)
 	i_suboriginremotelsn = PQfnumber(res, "suboriginremotelsn");
 	i_subenabled = PQfnumber(res, "subenabled");
 	i_subfailover = PQfnumber(res, "subfailover");
+	i_subincludegencols = PQfnumber(res, "subincludegencols");
 
 	subinfo = pg_malloc(ntups * sizeof(SubscriptionInfo));
 
@@ -4900,6 +4906,8 @@ getSubscriptions(Archive *fout)
 			pg_strdup(PQgetvalue(res, i, i_subenabled));
 		subinfo[i].subfailover =
 			pg_strdup(PQgetvalue(res, i, i_subfailover));
+		subinfo[i].subincludegencols =
+			pg_strdup(PQgetvalue(res, i, i_subincludegencols));
 
 		/* Decide whether we want to dump it */
 		selectDumpableObject(&(subinfo[i].dobj), fout);
@@ -5100,7 +5108,7 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 
 	/* Build list of quoted publications and append them to query. */
 	if (!parsePGArray(subinfo->subpublications, &pubnames, &npubnames))
-		pg_fatal("could not parse %s array", "subpublications");
+			pg_fatal("could not parse %s array", "subpublications");
 
 	publications = createPQExpBuffer();
 	for (i = 0; i < npubnames; i++)
@@ -5145,6 +5153,9 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 
 	if (pg_strcasecmp(subinfo->suborigin, LOGICALREP_ORIGIN_ANY) != 0)
 		appendPQExpBuffer(query, ", origin = %s", subinfo->suborigin);
+
+	if (strcmp(subinfo->subincludegencols, "t") == 0)
+		appendPQExpBufferStr(query, ", include_generated_columns = true");
 
 	appendPQExpBufferStr(query, ");\n");
 

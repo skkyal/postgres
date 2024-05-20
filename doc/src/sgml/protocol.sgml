@@ -3307,6 +3307,18 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
     </varlistentry>
 
     <varlistentry>
+     <term>include_generated_columns</term>
+      <listitem>
+       <para>
+        Boolean option to enable generated columns. This option controls
+        whether generated columns should be included in the string
+        representation of tuples during logical decoding in PostgreSQL.
+        The default is false.
+       </para>
+      </listitem>
+    </varlistentry>
+
+    <varlistentry>
      <term>
       origin
      </term>

@@ -86,7 +86,8 @@ static void publication_invalidation_cb(Datum arg, int cacheid,
 										uint32 hashvalue);
 static void send_relation_and_attrs(Relation relation, TransactionId xid,
 									LogicalDecodingContext *ctx,
-									Bitmapset *columns);
+									Bitmapset *columns,
+									bool include_generated_columns);
 static void send_repl_origin(LogicalDecodingContext *ctx,
 							 RepOriginId origin_id, XLogRecPtr origin_lsn,
 							 bool send_origin);
@@ -283,11 +284,13 @@ parse_output_parameters(List *options, PGOutputData *data)
 	bool		streaming_given = false;
 	bool		two_phase_option_given = false;
 	bool		origin_option_given = false;
+	bool		include_generated_columns_option_given = false;
 
 	data->binary = false;
 	data->streaming = LOGICALREP_STREAM_OFF;
 	data->messages = false;
 	data->two_phase = false;
+	data->include_generated_columns = false;
 
 	foreach(lc, options)
 	{
@@ -395,6 +398,16 @@ parse_output_parameters(List *options, PGOutputData *data)
 				ereport(ERROR,
 						errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						errmsg("unrecognized origin value: \"%s\"", origin));
+		}
+		else if (strcmp(defel->defname, "include_generated_columns") == 0)
+		{
+			if (include_generated_columns_option_given)
+				ereport(ERROR,
+						errcode(ERRCODE_SYNTAX_ERROR),
+						 errmsg("conflicting or redundant options"));
+			include_generated_columns_option_given = true;
+
+			data->include_generated_columns = defGetBoolean(defel);
 		}
 		else
 			elog(ERROR, "unrecognized pgoutput option: %s", defel->defname);
@@ -731,11 +744,13 @@ maybe_send_schema(LogicalDecodingContext *ctx,
 	{
 		Relation	ancestor = RelationIdGetRelation(relentry->publish_as_relid);
 
-		send_relation_and_attrs(ancestor, xid, ctx, relentry->columns);
+		send_relation_and_attrs(ancestor, xid, ctx, relentry->columns,
+								data->include_generated_columns);
 		RelationClose(ancestor);
 	}
 
-	send_relation_and_attrs(relation, xid, ctx, relentry->columns);
+	send_relation_and_attrs(relation, xid, ctx, relentry->columns,
+							data->include_generated_columns);
 
 	if (data->in_streaming)
 		set_schema_sent_in_streamed_txn(relentry, topxid);
@@ -749,7 +764,7 @@ maybe_send_schema(LogicalDecodingContext *ctx,
 static void
 send_relation_and_attrs(Relation relation, TransactionId xid,
 						LogicalDecodingContext *ctx,
-						Bitmapset *columns)
+						Bitmapset *columns, bool include_generated_columns)
 {
 	TupleDesc	desc = RelationGetDescr(relation);
 	int			i;
@@ -766,7 +781,10 @@ send_relation_and_attrs(Relation relation, TransactionId xid,
 	{
 		Form_pg_attribute att = TupleDescAttr(desc, i);
 
-		if (att->attisdropped || att->attgenerated)
+		if (att->attisdropped)
+			continue;
+
+		if (att->attgenerated && !include_generated_columns)
 			continue;
 
 		if (att->atttypid < FirstGenbkiObjectId)
@@ -782,7 +800,7 @@ send_relation_and_attrs(Relation relation, TransactionId xid,
 	}
 
 	OutputPluginPrepareWrite(ctx, false);
-	logicalrep_write_rel(ctx->out, xid, relation, columns);
+	logicalrep_write_rel(ctx->out, xid, relation, columns, include_generated_columns);
 	OutputPluginWrite(ctx, false);
 }
 
@@ -1085,7 +1103,7 @@ pgoutput_column_list_init(PGOutputData *data, List *publications,
 					{
 						Form_pg_attribute att = TupleDescAttr(desc, i);
 
-						if (att->attisdropped || att->attgenerated)
+						if (att->attisdropped)
 							continue;
 
 						nliveatts++;
@@ -1413,7 +1431,6 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	ReorderBufferChangeType action = change->action;
 	TupleTableSlot *old_slot = NULL;
 	TupleTableSlot *new_slot = NULL;
-
 	if (!is_publishable_relation(relation))
 		return;
 
@@ -1531,15 +1548,18 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	{
 		case REORDER_BUFFER_CHANGE_INSERT:
 			logicalrep_write_insert(ctx->out, xid, targetrel, new_slot,
-									data->binary, relentry->columns);
+									data->binary, relentry->columns,
+									data->include_generated_columns);
 			break;
 		case REORDER_BUFFER_CHANGE_UPDATE:
 			logicalrep_write_update(ctx->out, xid, targetrel, old_slot,
-									new_slot, data->binary, relentry->columns);
+									new_slot, data->binary, relentry->columns,
+									data->include_generated_columns);
 			break;
 		case REORDER_BUFFER_CHANGE_DELETE:
 			logicalrep_write_delete(ctx->out, xid, targetrel, old_slot,
-									data->binary, relentry->columns);
+									data->binary, relentry->columns,
+									data->include_generated_columns);
 			break;
 		default:
 			Assert(false);

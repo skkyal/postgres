@@ -28,16 +28,50 @@ $node_subscriber->safe_psql('postgres',
 	"CREATE TABLE tab1 (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 22) STORED, c int)"
 );
 
+# publisher-side tab2 has generated col 'b' but subscriber-side tab2 has NON-generated col 'b'.
+$node_publisher->safe_psql('postgres',
+	"CREATE TABLE tab2 (a int, b int GENERATED ALWAYS AS (a * 2) STORED)"
+);
+
+$node_subscriber->safe_psql('postgres',
+	"CREATE TABLE tab2 (a int, b int)"
+);
+
+# publisher-side tab3 has generated col 'b' but subscriber-side tab2 has DIFFERENT COMPUTATION generated col 'b'.
+$node_publisher->safe_psql('postgres',
+	"CREATE TABLE tab3 (a int, b int GENERATED ALWAYS AS (a + 10) STORED)"
+);
+
+$node_subscriber->safe_psql('postgres',
+	"CREATE TABLE tab3 (a int, b int GENERATED ALWAYS AS (a + 20) STORED)"
+);
+
 # data for initial sync
 
 $node_publisher->safe_psql('postgres',
 	"INSERT INTO tab1 (a) VALUES (1), (2), (3)");
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO tab2 (a) VALUES (1), (2), (3)");
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO tab3 (a) VALUES (1), (2), (3)");
 
 $node_publisher->safe_psql('postgres',
-	"CREATE PUBLICATION pub1 FOR ALL TABLES");
+	"CREATE PUBLICATION pub1 FOR TABLE tab1");
+$node_publisher->safe_psql('postgres',
+	"CREATE PUBLICATION pub2 FOR TABLE tab2");
+$node_publisher->safe_psql('postgres',
+	"CREATE PUBLICATION pub3 FOR TABLE tab3");
+
 $node_subscriber->safe_psql('postgres',
-	"CREATE SUBSCRIPTION sub1 CONNECTION '$publisher_connstr' PUBLICATION pub1"
-);
+	"CREATE SUBSCRIPTION sub1 CONNECTION '$publisher_connstr' PUBLICATION pub1");
+
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sub2 CONNECTION '$publisher_connstr' PUBLICATION pub2 WITH (include_generated_columns = true, copy_data = false)"
+	);
+
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sub3 CONNECTION '$publisher_connstr' PUBLICATION pub3 WITH (include_generated_columns = true, copy_data = false)"
+	);
 
 # Wait for initial sync of all subscriptions
 $node_subscriber->wait_for_subscription_sync;
@@ -46,6 +80,12 @@ my $result = $node_subscriber->safe_psql('postgres', "SELECT a, b FROM tab1");
 is( $result, qq(1|22
 2|44
 3|66), 'generated columns initial sync');
+
+$result = $node_subscriber->safe_psql('postgres', "SELECT a, b FROM tab2");
+is( $result, qq(), 'generated columns initial sync');
+
+$result = $node_subscriber->safe_psql('postgres', "SELECT a, b FROM tab3");
+is( $result, qq(), 'generated columns initial sync');
 
 # data to replicate
 
@@ -61,6 +101,23 @@ is( $result, qq(1|22|
 3|66|
 4|88|
 6|132|), 'generated columns replicated');
+
+$node_publisher->safe_psql('postgres', "INSERT INTO tab2 VALUES (4), (5)");
+
+$node_publisher->wait_for_catchup('sub2');
+
+# the column was NOT replicated because the result value of 'b'is the subscriber-side computed value
+$result = $node_subscriber->safe_psql('postgres', "SELECT a, b FROM tab2 ORDER BY a");
+is( $result, qq(4|8
+5|10), 'confirm generated columns ARE replicated when the subscriber-side column is not generated');
+
+$node_publisher->safe_psql('postgres', "INSERT INTO tab3 VALUES (4), (5)");
+
+$node_publisher->wait_for_catchup('sub3');
+
+$result = $node_subscriber->safe_psql('postgres', "SELECT a, b FROM tab3 ORDER BY a");
+is( $result, qq(4|24
+5|25), 'confirm generated columns are NOT replicated when the subscriber-side column is also generated');
 
 # try it with a subscriber-side trigger
 

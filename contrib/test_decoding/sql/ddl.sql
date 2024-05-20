@@ -437,6 +437,12 @@ SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'inc
 SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
 \pset format aligned
 
+-- check include-generated-columns option with generated column
+CREATE TABLE gencoltable (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) STORED);
+INSERT INTO gencoltable (a) VALUES (1), (2), (3);
+SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1', 'include-generated-columns', '1');
+DROP TABLE gencoltable;
+
 SELECT pg_drop_replication_slot('regression_slot');
 
 /* check that the slot is gone */

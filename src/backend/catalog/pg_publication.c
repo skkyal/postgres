@@ -534,12 +534,6 @@ publication_translate_columns(Relation targetrel, List *columns,
 					errmsg("cannot use system column \"%s\" in publication column list",
 						   colname));
 
-		if (TupleDescAttr(tupdesc, attnum - 1)->attgenerated)
-			ereport(ERROR,
-					errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-					errmsg("cannot use generated column \"%s\" in publication column list",
-						   colname));
-
 		if (bms_is_member(attnum, set))
 			ereport(ERROR,
 					errcode(ERRCODE_DUPLICATE_OBJECT),
@@ -1232,7 +1226,7 @@ pg_get_publication_tables(PG_FUNCTION_ARGS)
 			{
 				Form_pg_attribute att = TupleDescAttr(desc, i);
 
-				if (att->attisdropped || att->attgenerated)
+				if (att->attisdropped)
 					continue;
 
 				attnums[nattnums++] = att->attnum;

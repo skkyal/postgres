@@ -4379,6 +4379,7 @@ set_stream_options(WalRcvStreamOptions *options,
 
 	options->proto.logical.twophase = false;
 	options->proto.logical.origin = pstrdup(MySubscription->origin);
+	options->proto.logical.generated_column = MySubscription->generatedcolumn;
 }
 
 /*

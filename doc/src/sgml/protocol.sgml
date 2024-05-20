@@ -2033,6 +2033,15 @@ psql "dbname=postgres replication=database" -c "IDENTIFY_SYSTEM;"
          </para>
         </listitem>
        </varlistentry>
+              
+        <varlistentry>
+         <term><replaceable class="parameter">include-generated-columns</replaceable></term>
+         <listitem>
+        <para>
+        The include-generated-columns option controls whether generated columns should be included in the string representation of tuples during logical decoding in PostgreSQL. This allows users to customize the output format based on whether they want to include these columns or not.
+         </para>
+         </listitem>
+         </varlistentry>
 
        <varlistentry>
         <term><literal>TEMPORARY</literal></term>

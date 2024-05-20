@@ -1233,7 +1233,7 @@ $node_subscriber->wait_for_subscription_sync;
 
 is( $node_subscriber->safe_psql(
 		'postgres', "SELECT * FROM test_mix_4 ORDER BY a"),
-	qq(1|2||),
+	qq(1|2||2),
 	'initial synchronization with multiple publications with the same column list'
 );
 
@@ -1246,7 +1246,7 @@ $node_publisher->wait_for_catchup('sub1');
 
 is( $node_subscriber->safe_psql(
 		'postgres', "SELECT * FROM test_mix_4 ORDER BY a"),
-	qq(1|2||
+	qq(1|2||2
 3|4||),
 	'replication with multiple publications with the same column list');
 

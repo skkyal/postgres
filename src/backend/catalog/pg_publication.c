@@ -506,7 +506,6 @@ publication_translate_columns(Relation targetrel, List *columns,
 	Bitmapset  *set = NULL;
 	ListCell   *lc;
 	int			n = 0;
-	TupleDesc	tupdesc = RelationGetDescr(targetrel);
 
 	/* Bail out when no column list defined. */
 	if (!columns)
@@ -532,12 +531,6 @@ publication_translate_columns(Relation targetrel, List *columns,
 			ereport(ERROR,
 					errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
 					errmsg("cannot use system column \"%s\" in publication column list",
-						   colname));
-
-		if (TupleDescAttr(tupdesc, attnum - 1)->attgenerated)
-			ereport(ERROR,
-					errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-					errmsg("cannot use generated column \"%s\" in publication column list",
 						   colname));
 
 		if (bms_is_member(attnum, set))
@@ -1232,7 +1225,7 @@ pg_get_publication_tables(PG_FUNCTION_ARGS)
 			{
 				Form_pg_attribute att = TupleDescAttr(desc, i);
 
-				if (att->attisdropped || att->attgenerated)
+				if (att->attisdropped)
 					continue;
 
 				attnums[nattnums++] = att->attnum;

@@ -428,6 +428,25 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
          </para>
         </listitem>
        </varlistentry>
+
+       <varlistentry id="sql-createsubscription-params-with-include-generated-column">
+        <term><literal>include_generated_column</literal> (<type>boolean</type>)</term>
+        <listitem>
+         <para>
+          Specifies whether the generated columns present in the tables
+          associated with the subscription should be replicated. The default is
+          <literal>false</literal>.
+         </para>
+
+         <para>
+          This parameter can only be set true if <literal>copy_data</literal> is
+          set to <literal>false</literal>. If the subscriber-side column is also a
+          generated column then this option has no effect; the replicated data will
+          be ignored and the subscriber column will be filled as normal with the
+          subscriber-side computed or default data.
+         </para>
+        </listitem>
+       </varlistentry>
       </variablelist></para>
 
     </listitem>

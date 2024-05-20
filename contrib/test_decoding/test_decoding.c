@@ -31,6 +31,7 @@ typedef struct
 	bool		include_timestamp;
 	bool		skip_empty_xacts;
 	bool		only_local;
+	bool		include_generated_columns;
 } TestDecodingData;
 
 /*
@@ -168,6 +169,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 	data->include_timestamp = false;
 	data->skip_empty_xacts = false;
 	data->only_local = false;
+	data->include_generated_columns = true;
 
 	ctx->output_plugin_private = data;
 
@@ -254,6 +256,16 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 			if (elem->arg == NULL)
 				continue;
 			else if (!parse_bool(strVal(elem->arg), &enable_streaming))
+				ereport(ERROR,
+						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						 errmsg("could not parse value \"%s\" for parameter \"%s\"",
+								strVal(elem->arg), elem->defname)));
+		}
+		else if (strcmp(elem->defname, "include-generated-columns") == 0)
+		{
+			if (elem->arg == NULL)
+				data->include_generated_columns = true;
+			else if (!parse_bool(strVal(elem->arg), &data->include_generated_columns))
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("could not parse value \"%s\" for parameter \"%s\"",
@@ -521,7 +533,8 @@ print_literal(StringInfo s, Oid typid, char *outputstr)
 
 /* print the tuple 'tuple' into the StringInfo s */
 static void
-tuple_to_stringinfo(StringInfo s, TupleDesc tupdesc, HeapTuple tuple, bool skip_nulls)
+tuple_to_stringinfo(StringInfo s, TupleDesc tupdesc, HeapTuple tuple,
+					bool skip_nulls, bool include_generated_columns)
 {
 	int			natt;
 
@@ -542,6 +555,9 @@ tuple_to_stringinfo(StringInfo s, TupleDesc tupdesc, HeapTuple tuple, bool skip_
 		 * available for them
 		 */
 		if (attr->attisdropped)
+			continue;
+
+		if (attr->attgenerated && !include_generated_columns)
 			continue;
 
 		/*
@@ -641,7 +657,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 			else
 				tuple_to_stringinfo(ctx->out, tupdesc,
 									change->data.tp.newtuple,
-									false);
+									false, data->include_generated_columns);
 			break;
 		case REORDER_BUFFER_CHANGE_UPDATE:
 			appendStringInfoString(ctx->out, " UPDATE:");
@@ -650,7 +666,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 				appendStringInfoString(ctx->out, " old-key:");
 				tuple_to_stringinfo(ctx->out, tupdesc,
 									change->data.tp.oldtuple,
-									true);
+									true, data->include_generated_columns );
 				appendStringInfoString(ctx->out, " new-tuple:");
 			}
 
@@ -659,7 +675,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 			else
 				tuple_to_stringinfo(ctx->out, tupdesc,
 									change->data.tp.newtuple,
-									false);
+									false, data->include_generated_columns);
 			break;
 		case REORDER_BUFFER_CHANGE_DELETE:
 			appendStringInfoString(ctx->out, " DELETE:");
@@ -671,7 +687,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 			else
 				tuple_to_stringinfo(ctx->out, tupdesc,
 									change->data.tp.oldtuple,
-									true);
+									true, data->include_generated_columns);
 			break;
 		default:
 			Assert(false);

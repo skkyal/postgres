@@ -24,19 +24,42 @@ $node_publisher->safe_psql('postgres',
 	"CREATE TABLE tab1 (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) STORED)"
 );
 
+$node_publisher->safe_psql('postgres',
+	"CREATE TABLE tab2 (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) STORED)"
+);
+
 $node_subscriber->safe_psql('postgres',
 	"CREATE TABLE tab1 (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 22) STORED, c int)"
+);
+
+$node_subscriber->safe_psql('postgres',
+	"CREATE TABLE tab2 (a int PRIMARY KEY, b int)"
 );
 
 # data for initial sync
 
 $node_publisher->safe_psql('postgres',
 	"INSERT INTO tab1 (a) VALUES (1), (2), (3)");
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO tab2 (a) VALUES (1), (2), (3)");
 
 $node_publisher->safe_psql('postgres',
-	"CREATE PUBLICATION pub1 FOR ALL TABLES");
+	"CREATE PUBLICATION pub1 FOR TABLE tab1");
+$node_publisher->safe_psql('postgres',
+	"CREATE PUBLICATION pub2 FOR TABLE tab2");
 $node_subscriber->safe_psql('postgres',
 	"CREATE SUBSCRIPTION sub1 CONNECTION '$publisher_connstr' PUBLICATION pub1"
+);
+
+my ($cmdret, $stdout, $stderr) = $node_subscriber->psql('postgres', qq(
+	CREATE SUBSCRIPTION sub2 CONNECTION '$publisher_connstr' PUBLICATION pub2 WITH (include_generated_column = true)
+));
+ok( $stderr =~
+	  qr/copy_data = true and include_generated_column = true are mutually exclusive options/,
+	'cannot use both include_generated_column and copy_data as true');
+
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sub2 CONNECTION '$publisher_connstr' PUBLICATION pub2 WITH (include_generated_column = true, copy_data = false)"
 );
 
 # Wait for initial sync of all subscriptions
@@ -61,6 +84,14 @@ is( $result, qq(1|22|
 3|66|
 4|88|
 6|132|), 'generated columns replicated');
+
+$node_publisher->safe_psql('postgres', "INSERT INTO tab2 VALUES (4), (5)");
+
+$node_publisher->wait_for_catchup('sub1');
+
+$result = $node_subscriber->safe_psql('postgres', "SELECT * FROM tab2");
+is( $result, qq(4|8
+5|10), 'generated columns replicated to non-generated column on subscriber');
 
 # try it with a subscriber-side trigger
 

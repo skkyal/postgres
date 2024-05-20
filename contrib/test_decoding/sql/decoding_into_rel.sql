@@ -39,4 +39,12 @@ SELECT * FROM slot_changes_wrapper('regression_slot');
 
 SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1');
 
+-- check include-generated-columns option with generated column
+CREATE TABLE gencoltable (a int PRIMARY KEY, b int GENERATED ALWAYS AS (a * 2) STORED);
+INSERT INTO gencoltable (a) VALUES (1), (2), (3);
+SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1', 'include-generated-columns', '1');
+INSERT INTO gencoltable (a) VALUES (4), (5), (6);
+SELECT data FROM pg_logical_slot_get_changes('regression_slot', NULL, NULL, 'include-xids', '0', 'skip-empty-xacts', '1', 'include-generated-columns', '0');
+DROP TABLE gencoltable;
+
 SELECT 'stop' FROM pg_drop_replication_slot('regression_slot');

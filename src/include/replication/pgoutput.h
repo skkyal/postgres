@@ -33,6 +33,7 @@ typedef struct PGOutputData
 	bool		messages;
 	bool		two_phase;
 	bool		publish_no_origin;
+	bool		include_generated_columns;
 } PGOutputData;
 
 #endif							/* PGOUTPUT_H */

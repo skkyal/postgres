@@ -30,10 +30,12 @@
 #define TRUNCATE_RESTART_SEQS	(1<<1)
 
 static void logicalrep_write_attrs(StringInfo out, Relation rel,
-								   Bitmapset *columns);
+								   Bitmapset *columns,
+								   bool include_generated_columns);
 static void logicalrep_write_tuple(StringInfo out, Relation rel,
 								   TupleTableSlot *slot,
-								   bool binary, Bitmapset *columns);
+								   bool binary, Bitmapset *columns,
+								   bool include_generated_columns);
 static void logicalrep_read_attrs(StringInfo in, LogicalRepRelation *rel);
 static void logicalrep_read_tuple(StringInfo in, LogicalRepTupleData *tuple);
 
@@ -412,7 +414,8 @@ logicalrep_read_origin(StringInfo in, XLogRecPtr *origin_lsn)
  */
 void
 logicalrep_write_insert(StringInfo out, TransactionId xid, Relation rel,
-						TupleTableSlot *newslot, bool binary, Bitmapset *columns)
+						TupleTableSlot *newslot, bool binary, Bitmapset *columns,
+						bool include_generated_columns)
 {
 	pq_sendbyte(out, LOGICAL_REP_MSG_INSERT);
 
@@ -424,7 +427,8 @@ logicalrep_write_insert(StringInfo out, TransactionId xid, Relation rel,
 	pq_sendint32(out, RelationGetRelid(rel));
 
 	pq_sendbyte(out, 'N');		/* new tuple follows */
-	logicalrep_write_tuple(out, rel, newslot, binary, columns);
+	logicalrep_write_tuple(out, rel, newslot, binary, columns,
+						   include_generated_columns);
 }
 
 /*
@@ -457,7 +461,8 @@ logicalrep_read_insert(StringInfo in, LogicalRepTupleData *newtup)
 void
 logicalrep_write_update(StringInfo out, TransactionId xid, Relation rel,
 						TupleTableSlot *oldslot, TupleTableSlot *newslot,
-						bool binary, Bitmapset *columns)
+						bool binary, Bitmapset *columns,
+						bool include_generated_columns)
 {
 	pq_sendbyte(out, LOGICAL_REP_MSG_UPDATE);
 
@@ -478,11 +483,13 @@ logicalrep_write_update(StringInfo out, TransactionId xid, Relation rel,
 			pq_sendbyte(out, 'O');	/* old tuple follows */
 		else
 			pq_sendbyte(out, 'K');	/* old key follows */
-		logicalrep_write_tuple(out, rel, oldslot, binary, columns);
+		logicalrep_write_tuple(out, rel, oldslot, binary, columns,
+							   include_generated_columns);
 	}
 
 	pq_sendbyte(out, 'N');		/* new tuple follows */
-	logicalrep_write_tuple(out, rel, newslot, binary, columns);
+	logicalrep_write_tuple(out, rel, newslot, binary, columns,
+						   include_generated_columns);
 }
 
 /*
@@ -532,7 +539,7 @@ logicalrep_read_update(StringInfo in, bool *has_oldtuple,
 void
 logicalrep_write_delete(StringInfo out, TransactionId xid, Relation rel,
 						TupleTableSlot *oldslot, bool binary,
-						Bitmapset *columns)
+						Bitmapset *columns, bool include_generated_columns)
 {
 	Assert(rel->rd_rel->relreplident == REPLICA_IDENTITY_DEFAULT ||
 		   rel->rd_rel->relreplident == REPLICA_IDENTITY_FULL ||
@@ -552,7 +559,8 @@ logicalrep_write_delete(StringInfo out, TransactionId xid, Relation rel,
 	else
 		pq_sendbyte(out, 'K');	/* old key follows */
 
-	logicalrep_write_tuple(out, rel, oldslot, binary, columns);
+	logicalrep_write_tuple(out, rel, oldslot, binary, columns,
+						   include_generated_columns);
 }
 
 /*
@@ -668,7 +676,7 @@ logicalrep_write_message(StringInfo out, TransactionId xid, XLogRecPtr lsn,
  */
 void
 logicalrep_write_rel(StringInfo out, TransactionId xid, Relation rel,
-					 Bitmapset *columns)
+					 Bitmapset *columns, bool include_generated_columns)
 {
 	char	   *relname;
 
@@ -690,7 +698,7 @@ logicalrep_write_rel(StringInfo out, TransactionId xid, Relation rel,
 	pq_sendbyte(out, rel->rd_rel->relreplident);
 
 	/* send the attribute info */
-	logicalrep_write_attrs(out, rel, columns);
+	logicalrep_write_attrs(out, rel, columns, include_generated_columns);
 }
 
 /*
@@ -767,7 +775,8 @@ logicalrep_read_typ(StringInfo in, LogicalRepTyp *ltyp)
  */
 static void
 logicalrep_write_tuple(StringInfo out, Relation rel, TupleTableSlot *slot,
-					   bool binary, Bitmapset *columns)
+					   bool binary, Bitmapset *columns,
+					   bool include_generated_columns)
 {
 	TupleDesc	desc;
 	Datum	   *values;
@@ -781,7 +790,10 @@ logicalrep_write_tuple(StringInfo out, Relation rel, TupleTableSlot *slot,
 	{
 		Form_pg_attribute att = TupleDescAttr(desc, i);
 
-		if (att->attisdropped || att->attgenerated)
+		if (att->attisdropped)
+			continue;
+
+		if (att->attgenerated && !include_generated_columns)
 			continue;
 
 		if (!column_in_column_list(att->attnum, columns))
@@ -802,7 +814,10 @@ logicalrep_write_tuple(StringInfo out, Relation rel, TupleTableSlot *slot,
 		Form_pg_type typclass;
 		Form_pg_attribute att = TupleDescAttr(desc, i);
 
-		if (att->attisdropped || att->attgenerated)
+		if (att->attisdropped)
+			continue;
+
+		if (att->attgenerated && !include_generated_columns)
 			continue;
 
 		if (!column_in_column_list(att->attnum, columns))
@@ -923,7 +938,8 @@ logicalrep_read_tuple(StringInfo in, LogicalRepTupleData *tuple)
  * Write relation attribute metadata to the stream.
  */
 static void
-logicalrep_write_attrs(StringInfo out, Relation rel, Bitmapset *columns)
+logicalrep_write_attrs(StringInfo out, Relation rel, Bitmapset *columns,
+					   bool include_generated_columns)
 {
 	TupleDesc	desc;
 	int			i;
@@ -938,7 +954,10 @@ logicalrep_write_attrs(StringInfo out, Relation rel, Bitmapset *columns)
 	{
 		Form_pg_attribute att = TupleDescAttr(desc, i);
 
-		if (att->attisdropped || att->attgenerated)
+		if (att->attisdropped)
+			continue;
+
+		if (att->attgenerated && !include_generated_columns)
 			continue;
 
 		if (!column_in_column_list(att->attnum, columns))
@@ -959,7 +978,10 @@ logicalrep_write_attrs(StringInfo out, Relation rel, Bitmapset *columns)
 		Form_pg_attribute att = TupleDescAttr(desc, i);
 		uint8		flags = 0;
 
-		if (att->attisdropped || att->attgenerated)
+		if (att->attisdropped)
+			continue;
+
+		if (att->attgenerated && !include_generated_columns)
 			continue;
 
 		if (!column_in_column_list(att->attnum, columns))

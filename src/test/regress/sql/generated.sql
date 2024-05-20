@@ -197,7 +197,15 @@ COPY gtest1 FROM stdin;
 4
 \.
 
-COPY gtest1 (a, b) FROM stdin;
+COPY gtest1(a) FROM stdin;
+3
+4
+\.
+
+COPY gtest1 (a, b) FROM stdin DELIMITER ' ';
+5 1
+6 1
+\.
 
 SELECT * FROM gtest1 ORDER BY a;
 
@@ -213,7 +221,15 @@ COPY gtest3 FROM stdin;
 4
 \.
 
-COPY gtest3 (a, b) FROM stdin;
+COPY gtest3(a) FROM stdin;
+3
+4
+\.
+
+COPY gtest3 (a, b) FROM stdin  DELIMITER ' ';
+5 1
+6 1
+\.
 
 SELECT * FROM gtest3 ORDER BY a;
 

@@ -847,11 +847,6 @@ ProcessCopyOptions(ParseState *pstate,
  * or NIL if there was none (in which case we want all the non-dropped
  * columns).
  *
- * We don't include generated columns in the generated full list and we don't
- * allow them to be specified explicitly.  They don't make sense for COPY
- * FROM, but we could possibly allow them for COPY TO.  But this way it's at
- * least ensured that whatever we copy out can be copied back in.
- *
  * rel can be NULL ... it's only used for error reports.
  */
 List *
@@ -868,8 +863,6 @@ CopyGetAttnums(TupleDesc tupDesc, Relation rel, List *attnamelist)
 		for (i = 0; i < attr_count; i++)
 		{
 			if (TupleDescAttr(tupDesc, i)->attisdropped)
-				continue;
-			if (TupleDescAttr(tupDesc, i)->attgenerated)
 				continue;
 			attnums = lappend_int(attnums, i + 1);
 		}
@@ -895,12 +888,6 @@ CopyGetAttnums(TupleDesc tupDesc, Relation rel, List *attnamelist)
 					continue;
 				if (namestrcmp(&(att->attname), name) == 0)
 				{
-					if (att->attgenerated)
-						ereport(ERROR,
-								(errcode(ERRCODE_INVALID_COLUMN_REFERENCE),
-								 errmsg("column \"%s\" is a generated column",
-										name),
-								 errdetail("Generated columns cannot be used in COPY.")));
 					attnum = att->attnum;
 					break;
 				}

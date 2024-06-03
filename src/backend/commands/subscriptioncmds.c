@@ -103,7 +103,7 @@ typedef struct SubOpts
 	bool		include_generated_column;
 } SubOpts;
 
-static List *fetch_table_list(WalReceiverConn *wrconn, List *publications);
+static List *fetch_table_list(WalReceiverConn *wrconn, List *publications, bool include_generated_column);
 static void check_publications_origin(WalReceiverConn *wrconn,
 									  List *publications, bool copydata,
 									  char *origin, Oid *subrel_local_oids,
@@ -459,20 +459,6 @@ parse_subscription_options(ParseState *pstate, List *stmt_options,
 								"slot_name = NONE", "create_slot = false")));
 		}
 	}
-
-	/*
-	 * Do additional checking for disallowed combination when copy_data and
-	 * include_generated_column are true. COPY of generated columns is not supported
-	 * yet.
-	 */
-	if (opts->copy_data && opts->include_generated_column)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-		/*- translator: both %s are strings of the form "option = value" */
-					errmsg("%s and %s are mutually exclusive options",
-						"copy_data = true", "include_generated_column = true")));
-	}
 }
 
 /*
@@ -802,7 +788,7 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 			 * Get the table list from publisher and build local table status
 			 * info.
 			 */
-			tables = fetch_table_list(wrconn, publications);
+			tables = fetch_table_list(wrconn, publications, opts.include_generated_column);
 			foreach(lc, tables)
 			{
 				RangeVar   *rv = (RangeVar *) lfirst(lc);
@@ -925,7 +911,7 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 			check_publications(wrconn, validate_publications);
 
 		/* Get the table list from publisher. */
-		pubrel_names = fetch_table_list(wrconn, sub->publications);
+		pubrel_names = fetch_table_list(wrconn, sub->publications, sub->includegeneratedcolumn);
 
 		/* Get local table list. */
 		subrel_states = GetSubscriptionRelations(sub->oid, false);
@@ -2161,15 +2147,17 @@ check_publications_origin(WalReceiverConn *wrconn, List *publications,
  * list and row filter are specified for different publications.
  */
 static List *
-fetch_table_list(WalReceiverConn *wrconn, List *publications)
+fetch_table_list(WalReceiverConn *wrconn, List *publications, bool include_generated_column)
 {
 	WalRcvExecResult *res;
 	StringInfoData cmd;
 	TupleTableSlot *slot;
-	Oid			tableRow[3] = {TEXTOID, TEXTOID, InvalidOid};
+	Oid			tableRow[4] = {TEXTOID, TEXTOID, InvalidOid, InvalidOid};
 	List	   *tablelist = NIL;
 	int			server_version = walrcv_server_version(wrconn);
 	bool		check_columnlist = (server_version >= 150000);
+	bool		check_gen_col = (server_version >= 170000);
+	int 		column_count;
 
 	initStringInfo(&cmd);
 
@@ -2195,8 +2183,19 @@ fetch_table_list(WalReceiverConn *wrconn, List *publications)
 		 * to worry if different publications have specified them in a
 		 * different order. See publication_translate_columns.
 		 */
-		appendStringInfo(&cmd, "SELECT DISTINCT n.nspname, c.relname, gpt.attrs\n"
-						 "       FROM pg_class c\n"
+		appendStringInfo(&cmd, "SELECT DISTINCT n.nspname, c.relname, gpt.attrs\n");
+
+		/*
+		 * Get the count of generated columns in the table in the the publication.
+		 */
+		if(!include_generated_column && check_gen_col)
+		{
+			tableRow[3] = INT8OID;
+			appendStringInfo(&cmd, ", (SELECT COUNT(*) FROM pg_attribute a where a.attrelid = c.oid\n"
+								   " and a.attnum = ANY(gpt.attrs) and a.attgenerated = 's') gen_col_count\n");
+		}
+
+		appendStringInfo(&cmd, "  FROM pg_class c\n"
 						 "         JOIN pg_namespace n ON n.oid = c.relnamespace\n"
 						 "         JOIN ( SELECT (pg_get_publication_tables(VARIADIC array_agg(pubname::text))).*\n"
 						 "                FROM pg_publication\n"
@@ -2221,7 +2220,8 @@ fetch_table_list(WalReceiverConn *wrconn, List *publications)
 		appendStringInfoChar(&cmd, ')');
 	}
 
-	res = walrcv_exec(wrconn, cmd.data, check_columnlist ? 3 : 2, tableRow);
+	column_count = (!include_generated_column && check_gen_col) ? 4 : (check_columnlist ? 3 : 2);
+	res = walrcv_exec(wrconn, cmd.data, column_count, tableRow);
 	pfree(cmd.data);
 
 	if (res->status != WALRCV_OK_TUPLES)
@@ -2236,6 +2236,10 @@ fetch_table_list(WalReceiverConn *wrconn, List *publications)
 	{
 		char	   *nspname;
 		char	   *relname;
+		ArrayType  *attlist;
+		int			gen_col_count;
+		int			attcount;
+		Datum		attlistdatum;
 		bool		isnull;
 		RangeVar   *rv;
 
@@ -2243,6 +2247,28 @@ fetch_table_list(WalReceiverConn *wrconn, List *publications)
 		Assert(!isnull);
 		relname = TextDatumGetCString(slot_getattr(slot, 2, &isnull));
 		Assert(!isnull);
+
+		/* attlistdatum can be NULL in case of publication is created on table with no columns */
+		attlistdatum = slot_getattr(slot, 3, &isnull);
+
+		/*
+		 * If include_generated_column option is false and all the column of the table in the
+		 * publication are generated then we should throw an error.
+		 */
+		if (!isnull && !include_generated_column && check_gen_col)
+		{
+			attlist = DatumGetArrayTypeP(attlistdatum);
+			gen_col_count = DatumGetInt32(slot_getattr(slot, 4, &isnull));
+			Assert(!isnull);
+
+			attcount = ArrayGetNItems(ARR_NDIM(attlist), ARR_DIMS(attlist));
+
+			if (attcount != 0 && attcount == gen_col_count)
+				ereport(ERROR,
+						errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("cannot use only generated column for table \"%s.%s\" in publication when generated_column option is false",
+						   nspname, relname));
+		}
 
 		rv = makeRangeVar(nspname, relname, -1);
 

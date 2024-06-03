@@ -439,11 +439,10 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
          </para>
 
          <para>
-          This parameter can only be set true if <literal>copy_data</literal> is
-          set to <literal>false</literal>. If the subscriber-side column is also a
-          generated column then this option has no effect; the replicated data will
-          be ignored and the subscriber column will be filled as normal with the
-          subscriber-side computed or default data.
+          If the subscriber-side column is also a generated column then this option
+          has no effect; the replicated data will be ignored and the subscriber 
+          column will be filled as normal with the subscriber-side computed or 
+          default data.
          </para>
         </listitem>
        </varlistentry>

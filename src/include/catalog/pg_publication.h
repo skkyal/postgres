@@ -40,6 +40,12 @@ CATALOG(pg_publication,6104,PublicationRelationId)
 	 */
 	bool		puballtables;
 
+	/*
+	 * indicates that this is special publication which should encompass all
+	 * sequences in the database (except for the unlogged and temp ones)
+	 */
+	bool		puballsequences;
+
 	/* true if inserts are published */
 	bool		pubinsert;
 
@@ -102,6 +108,7 @@ typedef struct Publication
 	Oid			oid;
 	char	   *name;
 	bool		alltables;
+	bool		allsequences;
 	bool		pubviaroot;
 	PublicationActions pubactions;
 } Publication;
@@ -147,6 +154,8 @@ extern List *GetPubPartitionOptionRelations(List *result,
 											Oid relid);
 extern Oid	GetTopMostAncestorInPublication(Oid puboid, List *ancestors,
 											int *ancestor_level);
+
+extern  List *GetAllSequencesPublicationRelations(void);
 
 extern bool is_publishable_relation(Relation rel);
 extern bool is_schema_publication(Oid pubid);

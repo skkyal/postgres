@@ -117,6 +117,21 @@ RESET client_min_messages;
 DROP TABLE testpub_tbl3, testpub_tbl3a;
 DROP PUBLICATION testpub3, testpub4;
 
+--- adding sequences
+CREATE SEQUENCE testpub_seq0;
+CREATE SEQUENCE pub_test.testpub_seq1;
+
+SET client_min_messages = 'ERROR';
+CREATE PUBLICATION testpub_forallsequences FOR ALL SEQUENCES;
+RESET client_min_messages;
+
+SELECT pubname, puballtables, puballsequences FROM pg_publication WHERE pubname = 'testpub_forallsequences';
+\d+ pub_test.testpub_seq1
+\dRp+ testpub_forallsequences
+DROP SEQUENCE testpub_seq0, pub_test.testpub_seq1;
+DROP PUBLICATION testpub_forallsequences;
+
+
 -- Tests for partitioned tables
 SET client_min_messages = 'ERROR';
 CREATE PUBLICATION testpub_forparted;

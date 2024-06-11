@@ -727,6 +727,7 @@ CheckPubRelationColumnList(char *pubname, List *tables,
 ObjectAddress
 CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 {
+	ListCell   *lc;
 	Relation	rel;
 	ObjectAddress myself;
 	Oid			puboid;
@@ -741,6 +742,23 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 	List	   *relations = NIL;
 	List	   *schemaidlist = NIL;
 
+	bool		for_all_tables = false;
+	bool		for_all_sequences = false;
+
+	/*
+	 * Translate the list of object types (represented by strings) to bool
+	 * flags.
+	 */
+	foreach(lc, stmt->for_all_objects)
+	{
+		char	   *val = strVal(lfirst(lc));
+
+		if (strcmp(val, "tables") == 0)
+			for_all_tables = true;
+		else if (strcmp(val, "sequences") == 0)
+			for_all_sequences = true;
+	}
+
 	/* must have CREATE privilege on database */
 	aclresult = object_aclcheck(DatabaseRelationId, MyDatabaseId, GetUserId(), ACL_CREATE);
 	if (aclresult != ACLCHECK_OK)
@@ -748,10 +766,16 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 					   get_database_name(MyDatabaseId));
 
 	/* FOR ALL TABLES requires superuser */
-	if (stmt->for_all_tables && !superuser())
+	if (for_all_tables && !superuser())
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 				 errmsg("must be superuser to create FOR ALL TABLES publication")));
+
+	/* FOR ALL SEQUENCES requires superuser */
+	if (for_all_sequences && !superuser())
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("must be superuser to create FOR ALL SEQUENCES publication")));
 
 	rel = table_open(PublicationRelationId, RowExclusiveLock);
 
@@ -782,7 +806,9 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 								Anum_pg_publication_oid);
 	values[Anum_pg_publication_oid - 1] = ObjectIdGetDatum(puboid);
 	values[Anum_pg_publication_puballtables - 1] =
-		BoolGetDatum(stmt->for_all_tables);
+		BoolGetDatum(for_all_tables);
+	values[Anum_pg_publication_puballsequences - 1] =
+		BoolGetDatum(for_all_sequences);
 	values[Anum_pg_publication_pubinsert - 1] =
 		BoolGetDatum(pubactions.pubinsert);
 	values[Anum_pg_publication_pubupdate - 1] =
@@ -808,12 +834,17 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 	CommandCounterIncrement();
 
 	/* Associate objects with the publication. */
-	if (stmt->for_all_tables)
+	if (for_all_tables || for_all_sequences)
 	{
 		/* Invalidate relcache so that publication info is rebuilt. */
 		CacheInvalidateRelcacheAll();
 	}
-	else
+
+	/*
+	 * If the publication might have either tables or sequences (directly or
+	 * through a schema), process that.
+	 */
+	if (!for_all_tables || !for_all_sequences)
 	{
 		ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
 								   &schemaidlist);
@@ -1008,7 +1039,7 @@ AlterPublicationOptions(ParseState *pstate, AlterPublicationStmt *stmt,
 	pubform = (Form_pg_publication) GETSTRUCT(tup);
 
 	/* Invalidate the relcache. */
-	if (pubform->puballtables)
+	if (pubform->puballtables || pubform->puballsequences)
 	{
 		CacheInvalidateRelcacheAll();
 	}
@@ -1494,7 +1525,7 @@ RemovePublicationById(Oid pubid)
 	pubform = (Form_pg_publication) GETSTRUCT(tup);
 
 	/* Invalidate relcache so that publication info is rebuilt. */
-	if (pubform->puballtables)
+	if (pubform->puballtables || pubform->puballsequences)
 		CacheInvalidateRelcacheAll();
 
 	CatalogTupleDelete(rel, &tup->t_self);
@@ -1749,7 +1780,7 @@ PublicationAddTables(Oid pubid, List *rels, bool if_not_exists,
 {
 	ListCell   *lc;
 
-	Assert(!stmt || !stmt->for_all_tables);
+	Assert(!stmt || !stmt->for_all_objects);
 
 	foreach(lc, rels)
 	{
@@ -1828,7 +1859,7 @@ PublicationAddSchemas(Oid pubid, List *schemas, bool if_not_exists,
 {
 	ListCell   *lc;
 
-	Assert(!stmt || !stmt->for_all_tables);
+	Assert(!stmt || !stmt->for_all_objects);
 
 	foreach(lc, schemas)
 	{
@@ -1918,6 +1949,13 @@ AlterPublicationOwner_internal(Relation rel, HeapTuple tup, Oid newOwnerId)
 					 errmsg("permission denied to change owner of publication \"%s\"",
 							NameStr(form->pubname)),
 					 errhint("The owner of a FOR ALL TABLES publication must be a superuser.")));
+
+		if (form->puballsequences && !superuser_arg(newOwnerId))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to change owner of publication \"%s\"",
+							NameStr(form->pubname)),
+					 errhint("The owner of a FOR ALL SEQUENCES publication must be a superuser.")));
 
 		if (!superuser_arg(newOwnerId) && is_schema_publication(form->oid))
 			ereport(ERROR,

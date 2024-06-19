@@ -32,6 +32,7 @@ typedef enum LogicalRepWorkerType
 	WORKERTYPE_TABLESYNC,
 	WORKERTYPE_APPLY,
 	WORKERTYPE_PARALLEL_APPLY,
+	WORKERTYPE_SEQUENCESYNC,
 } LogicalRepWorkerType;
 
 typedef struct LogicalRepWorker
@@ -240,6 +241,8 @@ extern PGDLLIMPORT bool InitializingApplyWorker;
 extern void logicalrep_worker_attach(int slot);
 extern LogicalRepWorker *logicalrep_worker_find(Oid subid, Oid relid,
 												bool only_running);
+extern LogicalRepWorker *logicalrep_sequence_sync_worker_find(Oid subid,
+															  bool only_running);
 extern List *logicalrep_workers_find(Oid subid, bool only_running);
 extern bool logicalrep_worker_launch(LogicalRepWorkerType wtype,
 									 Oid dbid, Oid subid, const char *subname,
@@ -251,6 +254,8 @@ extern void logicalrep_worker_wakeup(Oid subid, Oid relid);
 extern void logicalrep_worker_wakeup_ptr(LogicalRepWorker *worker);
 
 extern int	logicalrep_sync_worker_count(Oid subid);
+
+extern void pg_attribute_noreturn() finish_sync_worker(bool istable);
 
 extern void ReplicationOriginNameForLogicalRep(Oid suboid, Oid relid,
 											   char *originname, Size szoriginname);
@@ -329,11 +334,19 @@ extern void pa_xact_finish(ParallelApplyWorkerInfo *winfo,
 									   (worker)->type == WORKERTYPE_PARALLEL_APPLY)
 #define isTablesyncWorker(worker) ((worker)->in_use && \
 								   (worker)->type == WORKERTYPE_TABLESYNC)
+#define isSequencesyncWorker(worker) ((worker)->in_use && \
+									  (worker)->type == WORKERTYPE_SEQUENCESYNC)
 
 static inline bool
 am_tablesync_worker(void)
 {
 	return isTablesyncWorker(MyLogicalRepWorker);
+}
+
+static inline bool
+am_sequencesync_worker(void)
+{
+	return isSequencesyncWorker(MyLogicalRepWorker);
 }
 
 static inline bool

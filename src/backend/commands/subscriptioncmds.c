@@ -102,6 +102,7 @@ typedef struct SubOpts
 } SubOpts;
 
 static List *fetch_table_list(WalReceiverConn *wrconn, List *publications);
+static List *fetch_sequence_list(WalReceiverConn *wrconn, List *publications);
 static void check_publications_origin(WalReceiverConn *wrconn,
 									  List *publications, bool copydata,
 									  char *origin, Oid *subrel_local_oids,
@@ -759,6 +760,7 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 
 		PG_TRY();
 		{
+			List *sequences;
 			check_publications(wrconn, publications);
 			check_publications_origin(wrconn, publications, opts.copy_data,
 									  opts.origin, NULL, 0, stmt->subname);
@@ -768,6 +770,23 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 			 * not.
 			 */
 			table_state = opts.copy_data ? SUBREL_STATE_INIT : SUBREL_STATE_READY;
+
+			/* Add the sequences in init state */
+			sequences = fetch_sequence_list(wrconn, publications);
+			foreach(lc, sequences)
+			{
+				RangeVar   *rv = (RangeVar *) lfirst(lc);
+				Oid			relid;
+
+				relid = RangeVarGetRelid(rv, AccessShareLock, false);
+
+				/* Check for supported relkind. */
+				CheckSubscriptionRelkind(get_rel_relkind(relid),
+										rv->schemaname, rv->relname);
+
+				AddSubscriptionRelState(subid, relid, table_state,
+										InvalidXLogRecPtr, true);
+			}
 
 			/*
 			 * Get the table list from publisher and build local table status
@@ -898,6 +917,9 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 		/* Get the table list from publisher. */
 		pubrel_names = fetch_table_list(wrconn, sub->publications);
 
+		/* Get the sequence list from publisher. */
+		pubrel_names = list_concat(pubrel_names, fetch_sequence_list(wrconn, sub->publications));
+
 		/* Get local table list. */
 		subrel_states = GetSubscriptionRelations(sub->oid, false);
 		subrel_count = list_length(subrel_states);
@@ -980,6 +1002,7 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 			{
 				char		state;
 				XLogRecPtr	statelsn;
+				char relkind = get_rel_relkind(relid);
 
 				/*
 				 * Lock pg_subscription_rel with AccessExclusiveLock to
@@ -1006,13 +1029,15 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 
 				RemoveSubscriptionRel(sub->oid, relid);
 
-				logicalrep_worker_stop(sub->oid, relid);
+				/* Stop the worker if relation kind is not sequence*/
+				if (relkind != RELKIND_SEQUENCE)
+					logicalrep_worker_stop(sub->oid, relid);
 
 				/*
 				 * For READY state, we would have already dropped the
 				 * tablesync origin.
 				 */
-				if (state != SUBREL_STATE_READY)
+				if (state != SUBREL_STATE_READY && relkind != RELKIND_SEQUENCE)
 				{
 					char		originname[NAMEDATALEN];
 
@@ -1047,7 +1072,8 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 		for (off = 0; off < remove_rel_len; off++)
 		{
 			if (sub_remove_rels[off].state != SUBREL_STATE_READY &&
-				sub_remove_rels[off].state != SUBREL_STATE_SYNCDONE)
+				sub_remove_rels[off].state != SUBREL_STATE_SYNCDONE &&
+				get_rel_relkind(sub_remove_rels[off].relid) != RELKIND_SEQUENCE)
 			{
 				char		syncslotname[NAMEDATALEN] = {0};
 
@@ -1064,6 +1090,148 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 				ReplicationSlotNameForTablesync(sub->oid, sub_remove_rels[off].relid,
 												syncslotname, sizeof(syncslotname));
 				ReplicationSlotDropAtPubNode(wrconn, syncslotname, true);
+			}
+		}
+	}
+	PG_FINALLY();
+	{
+		walrcv_disconnect(wrconn);
+	}
+	PG_END_TRY();
+
+	if (rel)
+		table_close(rel, NoLock);
+}
+
+/*
+ * Refresh the sequences data of the subscription.
+ */
+static void
+AlterSubscription_refreshsequences(Subscription *sub)
+{
+	char	   *err;
+	List	   *pubseq_names = NIL;
+	List	   *subseq_states;
+	Oid		   *subseq_local_oids;
+	Oid		   *pubseq_local_oids;
+	ListCell   *lc;
+	int			off;
+	int			subrel_count;
+	Relation	rel = NULL;
+	WalReceiverConn *wrconn;
+	bool		must_use_password;
+
+	/* Load the library providing us libpq calls. */
+	load_file("libpqwalreceiver", false);
+
+	/* Try to connect to the publisher. */
+	must_use_password = sub->passwordrequired && !sub->ownersuperuser;
+	wrconn = walrcv_connect(sub->conninfo, true, true, must_use_password,
+							sub->name, &err);
+	if (!wrconn)
+		ereport(ERROR,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not connect to the publisher: %s", err)));
+
+	PG_TRY();
+	{
+		/* Get the sequences from the publisher. */
+		pubseq_names = fetch_sequence_list(wrconn, sub->publications);
+
+		/* Get local sequence list. */
+		subseq_states = GetSubscriptionSequences(sub->oid, '\0');
+		subrel_count = list_length(subseq_states);
+
+		/*
+		 * Build qsorted array of local sequence oids for faster lookup. This
+		 * can potentially contain all seqeunces in the database so speed of
+		 * lookup is important.
+		 */
+		subseq_local_oids = palloc(subrel_count * sizeof(Oid));
+		off = 0;
+		foreach(lc, subseq_states)
+		{
+			SubscriptionSeqInfo *seqinfo = (SubscriptionSeqInfo *) lfirst(lc);
+
+			subseq_local_oids[off++] = seqinfo->seqid;
+		}
+
+		qsort(subseq_local_oids, subrel_count, sizeof(Oid), oid_cmp);
+
+		/*
+		 * Walk over the remote sequences and try to match them to locally
+		 * known sequences. If the sequence is not known locally create a new
+		 * state for it.
+		 *
+		 * Also builds array of local oids of remote sequences for the next
+		 * step.
+		 */
+		off = 0;
+		pubseq_local_oids = palloc(list_length(pubseq_names) * sizeof(Oid));
+
+		foreach(lc, pubseq_names)
+		{
+			RangeVar   *rv = (RangeVar *) lfirst(lc);
+			Oid			relid;
+
+			relid = RangeVarGetRelid(rv, AccessShareLock, false);
+
+			/* Check for supported relkind. */
+			CheckSubscriptionRelkind(get_rel_relkind(relid),
+									 rv->schemaname, rv->relname);
+
+			pubseq_local_oids[off++] = relid;
+
+			if (!bsearch(&relid, subseq_local_oids,
+						 subrel_count, sizeof(Oid), oid_cmp))
+			{
+				AddSubscriptionRelState(sub->oid, relid,
+										SUBREL_STATE_INIT,
+										InvalidXLogRecPtr, true);
+				ereport(DEBUG1,
+						(errmsg_internal("sequence \"%s.%s\" added to subscription \"%s\"",
+										 rv->schemaname, rv->relname, sub->name)));
+			}
+		}
+
+		/*
+		 * Next remove state for sequences we should not care about anymore
+		 * using the data we collected above
+		 */
+		qsort(pubseq_local_oids, list_length(pubseq_names),
+			  sizeof(Oid), oid_cmp);
+
+		for (off = 0; off < subrel_count; off++)
+		{
+			Oid			relid = subseq_local_oids[off];
+
+			if (!bsearch(&relid, pubseq_local_oids,
+						 list_length(pubseq_names), sizeof(Oid), oid_cmp))
+			{
+				/*
+				 * This locking ensures that the state of rels won't change
+				 * till we are done with this refresh operation.
+				 */
+				if (!rel)
+					rel = table_open(SubscriptionRelRelationId, AccessExclusiveLock);
+
+				RemoveSubscriptionRel(sub->oid, relid);
+
+				ereport(DEBUG1,
+						(errmsg_internal("sequence \"%s.%s\" removed from subscription \"%s\"",
+										 get_namespace_name(get_rel_namespace(relid)),
+										 get_rel_name(relid),
+										 sub->name)));
+			}
+			else
+			{
+				ereport(DEBUG1,
+						(errmsg_internal("sequence \"%s.%s\" of subscription \"%s\" set to INIT state",
+										 get_namespace_name(get_rel_namespace(relid)),
+										 get_rel_name(relid),
+										 sub->name)));
+				UpdateSubscriptionRelState(sub->oid, relid, SUBREL_STATE_INIT,
+										   InvalidXLogRecPtr);
 			}
 		}
 	}
@@ -1400,6 +1568,20 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 					AlterSubscription_refresh(sub, opts.copy_data,
 											  validate_publications);
 				}
+
+				break;
+			}
+
+		case ALTER_SUBSCRIPTION_REFRESH_PUBLICATION_SEQUENCES:
+			{
+				if (!sub->enabled)
+					ereport(ERROR,
+							(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+							 errmsg("ALTER SUBSCRIPTION ... REFRESH PUBLICATION SEQUENCES is not allowed for disabled subscriptions")));
+
+				PreventInTransactionBlock(isTopLevel, "ALTER SUBSCRIPTION ... REFRESH PUBLICATION SEQUENCES");
+
+				AlterSubscription_refreshsequences(sub);
 
 				break;
 			}
@@ -2060,11 +2242,17 @@ check_publications_origin(WalReceiverConn *wrconn, List *publications,
 	for (i = 0; i < subrel_count; i++)
 	{
 		Oid			relid = subrel_local_oids[i];
-		char	   *schemaname = get_namespace_name(get_rel_namespace(relid));
-		char	   *tablename = get_rel_name(relid);
+		char	   *schemaname;
+		char	   *tablename;
 
-		appendStringInfo(&cmd, "AND NOT (N.nspname = '%s' AND C.relname = '%s')\n",
-						 schemaname, tablename);
+		if (get_rel_relkind(relid) != RELKIND_SEQUENCE)
+		{
+			schemaname = get_namespace_name(get_rel_namespace(relid));
+			tablename = get_rel_name(relid);
+
+			appendStringInfo(&cmd, "AND NOT (N.nspname = '%s' AND C.relname = '%s')\n",
+							 schemaname, tablename);
+		}
 	}
 
 	res = walrcv_exec(wrconn, cmd.data, 1, tableRow);
@@ -2224,6 +2412,75 @@ fetch_table_list(WalReceiverConn *wrconn, List *publications)
 						   nspname, relname));
 		else
 			tablelist = lappend(tablelist, rv);
+
+		ExecClearTuple(slot);
+	}
+	ExecDropSingleTupleTableSlot(slot);
+
+	walrcv_clear_result(res);
+
+	return tablelist;
+}
+
+/*
+ * Get the list of sequences which belong to specified publications on the
+ * publisher connection.
+ */
+static List *
+fetch_sequence_list(WalReceiverConn *wrconn, List *publications)
+{
+	WalRcvExecResult *res;
+	StringInfoData cmd;
+	TupleTableSlot *slot;
+	Oid			tableRow[2] = {TEXTOID, TEXTOID};
+	ListCell   *lc;
+	bool		first;
+	List	   *tablelist = NIL;
+
+	Assert(list_length(publications) > 0);
+
+	initStringInfo(&cmd);
+	appendStringInfoString(&cmd, "SELECT DISTINCT s.schemaname, s.sequencename\n"
+						   "  FROM pg_catalog.pg_publication_sequences s\n"
+						   " WHERE s.pubname IN (");
+	first = true;
+	foreach(lc, publications)
+	{
+		char	   *pubname = strVal(lfirst(lc));
+
+		if (first)
+			first = false;
+		else
+			appendStringInfoString(&cmd, ", ");
+
+		appendStringInfoString(&cmd, quote_literal_cstr(pubname));
+	}
+	appendStringInfoChar(&cmd, ')');
+
+	res = walrcv_exec(wrconn, cmd.data, 2, tableRow);
+	pfree(cmd.data);
+
+	if (res->status != WALRCV_OK_TUPLES)
+		ereport(ERROR,
+				(errmsg("could not receive list of replicated sequences from the publisher: %s",
+						res->err)));
+
+	/* Process sequences. */
+	slot = MakeSingleTupleTableSlot(res->tupledesc, &TTSOpsMinimalTuple);
+	while (tuplestore_gettupleslot(res->tuplestore, true, false, slot))
+	{
+		char	   *nspname;
+		char	   *relname;
+		bool		isnull;
+		RangeVar   *rv;
+
+		nspname = TextDatumGetCString(slot_getattr(slot, 1, &isnull));
+		Assert(!isnull);
+		relname = TextDatumGetCString(slot_getattr(slot, 2, &isnull));
+		Assert(!isnull);
+
+		rv = makeRangeVar(nspname, relname, -1);
+		tablelist = lappend(tablelist, rv);
 
 		ExecClearTuple(slot);
 	}

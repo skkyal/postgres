@@ -2768,6 +2768,7 @@ SubscriptingRefState
 Subscription
 SubscriptionInfo
 SubscriptionRelState
+SubscriptionSeqInfo
 SummarizerReadLocalXLogPrivate
 SupportRequestCost
 SupportRequestIndexCondition

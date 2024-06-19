@@ -159,6 +159,12 @@ typedef struct Subscription
 								 * specified origin */
 } Subscription;
 
+typedef struct SubscriptionSeqInfo
+{
+	Oid			seqid;
+	XLogRecPtr	lsn;
+} SubscriptionSeqInfo;
+
 /* Disallow streaming in-progress transactions. */
 #define LOGICALREP_STREAM_OFF 'f'
 

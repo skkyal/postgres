@@ -139,9 +139,9 @@ static StringInfo copybuf = NULL;
 /*
  * Exit routine for synchronization worker.
  */
-static void
+void
 pg_attribute_noreturn()
-finish_sync_worker(void)
+finish_sync_worker(bool istable)
 {
 	/*
 	 * Commit any outstanding transaction. This is the usual case, unless
@@ -157,10 +157,15 @@ finish_sync_worker(void)
 	XLogFlush(GetXLogWriteRecPtr());
 
 	StartTransactionCommand();
-	ereport(LOG,
-			(errmsg("logical replication table synchronization worker for subscription \"%s\", table \"%s\" has finished",
-					MySubscription->name,
-					get_rel_name(MyLogicalRepWorker->relid))));
+	if (istable)
+		ereport(LOG,
+				errmsg("logical replication table synchronization worker for subscription \"%s\", table \"%s\" has finished",
+					   MySubscription->name,
+					   get_rel_name(MyLogicalRepWorker->relid)));
+	else
+		ereport(LOG,
+				errmsg("logical replication sequences synchronization worker for subscription \"%s\" has finished",
+					   MySubscription->name));
 	CommitTransactionCommand();
 
 	/* Find the leader apply worker and signal it. */
@@ -387,7 +392,7 @@ process_syncing_tables_for_sync(XLogRecPtr current_lsn)
 		 */
 		replorigin_drop_by_name(originname, true, false);
 
-		finish_sync_worker();
+		finish_sync_worker(true);
 	}
 	else
 		SpinLockRelease(&MyLogicalRepWorker->relmutex);
@@ -463,6 +468,17 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 	foreach(lc, table_states_not_ready)
 	{
 		SubscriptionRelState *rstate = (SubscriptionRelState *) lfirst(lc);
+		char relkind;
+
+		if (!started_tx)
+		{
+			StartTransactionCommand();
+			started_tx = true;
+		}
+
+		relkind = get_rel_relkind(rstate->relid);
+		if (relkind == RELKIND_SEQUENCE)
+			continue;
 
 		if (rstate->state == SUBREL_STATE_SYNCDONE)
 		{
@@ -477,11 +493,6 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 
 				rstate->state = SUBREL_STATE_READY;
 				rstate->lsn = current_lsn;
-				if (!started_tx)
-				{
-					StartTransactionCommand();
-					started_tx = true;
-				}
 
 				/*
 				 * Remove the tablesync origin tracking if exists.
@@ -661,6 +672,105 @@ process_syncing_tables_for_apply(XLogRecPtr current_lsn)
 }
 
 /*
+ * Handle sequence synchronization cooperation from the apply worker.
+ *
+ * Walk over all subscription sequences that are individually tracked by the
+ * apply process (currently, all that have state SUBREL_STATE_INIT) and manage
+ * synchronization for them.
+ *
+ * If there is a sequence syncronization worker running already, no need to
+ * start a sequence synchronization in this case. The existing sequence
+ * sync worker will syncronize the sequences. If there are still any sequences
+ * to be synced after the sequence sync worker exited, then we new sequence
+ * sync worker can be started in the next iteration. To prevent starting the
+ * seqeuence sync worker at a high frequency after a failure, we store its last
+ * start time. We start the sync worker for the same relation after waiting
+ * at least wal_retrieve_retry_interval.
+ */
+static void
+process_syncing_sequences_for_apply()
+{
+	ListCell   *lc;
+	bool		started_tx = false;
+
+	Assert(!IsTransactionState());
+
+	/* We need up-to-date sync state info for subscription tables here. */
+	FetchTableStates(&started_tx);
+
+	/*
+	 * Start sequence sync worker if there is no sequence sync worker running.
+	 */
+	foreach(lc, table_states_not_ready)
+	{
+		SubscriptionRelState *rstate = (SubscriptionRelState *) lfirst(lc);
+		LogicalRepWorker *syncworker;
+		char relkind;
+
+		if (!started_tx)
+		{
+			StartTransactionCommand();
+			started_tx = true;
+		}
+
+		relkind = get_rel_relkind(rstate->relid);
+		if (relkind != RELKIND_SEQUENCE || rstate->state != SUBREL_STATE_INIT)
+			continue;
+
+		/*
+		 * Check if there is a sequence worker running?
+		 */
+		LWLockAcquire(LogicalRepWorkerLock, LW_SHARED);
+
+		syncworker = logicalrep_sequence_sync_worker_find(MyLogicalRepWorker->subid,
+															true);
+		/*
+		 * If there is a sequence sync worker, the sequence sync worker
+		 * will handle sync of this sequence.
+		 */
+		if (syncworker)
+		{
+			/* Now safe to release the LWLock */
+			LWLockRelease(LogicalRepWorkerLock);
+			break;
+		}
+		else
+		{
+			/*
+			 * Count running sync workers for this subscription, while we have
+			 * the lock.
+			 */
+			int	nsyncworkers =
+				logicalrep_sync_worker_count(MyLogicalRepWorker->subid);
+
+			/* Now safe to release the LWLock */
+			LWLockRelease(LogicalRepWorkerLock);
+
+			/*
+			 * If there are free sync worker slot(s), start a new sequence sync
+			 * worker to sync the sequences.
+			 */
+			if (nsyncworkers < max_sync_workers_per_subscription)
+			{
+				logicalrep_worker_launch(WORKERTYPE_SEQUENCESYNC,
+											MyLogicalRepWorker->dbid,
+											MySubscription->oid,
+											MySubscription->name,
+											MyLogicalRepWorker->userid,
+											InvalidOid,
+											DSM_HANDLE_INVALID);
+			}
+		}
+	}
+
+	if (started_tx)
+	{
+		CommitTransactionCommand();
+		pgstat_report_stat(true);
+	}
+}
+
+/*
  * Process possible state change(s) of tables that are being synchronized.
  */
 void
@@ -682,7 +792,14 @@ process_syncing_tables(XLogRecPtr current_lsn)
 			break;
 
 		case WORKERTYPE_APPLY:
+			process_syncing_sequences_for_apply();
 			process_syncing_tables_for_apply(current_lsn);
+			break;
+
+		/* Sequence sync is not expected to come here */
+		case WORKERTYPE_SEQUENCESYNC:
+			Assert(0);
+			/* not reached, here to make compiler happy */
 			break;
 
 		case WORKERTYPE_UNKNOWN:
@@ -1320,7 +1437,7 @@ LogicalRepSyncTableStart(XLogRecPtr *origin_startpos)
 		case SUBREL_STATE_SYNCDONE:
 		case SUBREL_STATE_READY:
 		case SUBREL_STATE_UNKNOWN:
-			finish_sync_worker();	/* doesn't return */
+			finish_sync_worker(true);	/* doesn't return */
 	}
 
 	/* Calculate the name of the tablesync slot. */
@@ -1716,7 +1833,7 @@ TablesyncWorkerMain(Datum main_arg)
 
 	run_tablesync_worker();
 
-	finish_sync_worker();
+	finish_sync_worker(true);
 }
 
 /*

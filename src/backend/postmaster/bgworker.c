@@ -132,6 +132,9 @@ static const struct
 	},
 	{
 		"TablesyncWorkerMain", TablesyncWorkerMain
+	},
+	{
+		"SequencesyncWorkerMain", SequencesyncWorkerMain
 	}
 };
 

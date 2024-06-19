@@ -27,6 +27,7 @@
 #include "utils/array.h"
 #include "utils/builtins.h"
 #include "utils/fmgroids.h"
+#include "utils/memutils.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_lsn.h"
 #include "utils/rel.h"
@@ -543,6 +544,69 @@ GetSubscriptionRelations(Oid subid, bool not_ready)
 			relstate->lsn = DatumGetLSN(d);
 
 		res = lappend(res, relstate);
+	}
+
+	/* Cleanup */
+	systable_endscan(scan);
+	table_close(rel, AccessShareLock);
+
+	return res;
+}
+
+
+/*
+ * Get the sequences for the subscription.
+ *
+ * The returned list is palloc'ed in the current memory context.
+ */
+List *
+GetSubscriptionSequences(Oid subid, char state)
+{
+	List	   *res = NIL;
+	Relation	rel;
+	HeapTuple	tup;
+	int			nkeys = 0;
+	ScanKeyData skey[2];
+	SysScanDesc scan;
+	MemoryContext oldctx;
+
+	rel = table_open(SubscriptionRelRelationId, AccessShareLock);
+
+	ScanKeyInit(&skey[nkeys++],
+				Anum_pg_subscription_rel_srsubid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(subid));
+
+	if (state != '\0')
+		ScanKeyInit(&skey[nkeys++],
+					Anum_pg_subscription_rel_srsubstate,
+					BTEqualStrategyNumber, F_CHAREQ,
+					CharGetDatum(state));
+
+	scan = systable_beginscan(rel, InvalidOid, false,
+							  NULL, nkeys, skey);
+
+	while (HeapTupleIsValid(tup = systable_getnext(scan)))
+	{
+		Form_pg_subscription_rel subseq;
+		SubscriptionRelState *seqinfo;
+		Datum		d;
+		bool		isnull;
+
+		/* Allocate the tracking info in a permanent memory context. */
+		oldctx = MemoryContextSwitchTo(CacheMemoryContext);
+		subseq = (Form_pg_subscription_rel) GETSTRUCT(tup);
+		seqinfo = (SubscriptionRelState *) palloc(sizeof(SubscriptionRelState));
+		seqinfo->relid = subseq->srrelid;
+		d = SysCacheGetAttr(SUBSCRIPTIONRELMAP, tup,
+							Anum_pg_subscription_rel_srsublsn, &isnull);
+		if (isnull)
+			seqinfo->lsn = InvalidXLogRecPtr;
+		else
+			seqinfo->lsn = DatumGetLSN(d);
+
+		res = lappend(res, seqinfo);
+		MemoryContextSwitchTo(oldctx);
 	}
 
 	/* Cleanup */

@@ -268,6 +268,39 @@ logicalrep_worker_find(Oid subid, Oid relid, bool only_running)
 }
 
 /*
+ * Walks the workers array and searches for one that matches given
+ * subscription id.
+ *
+ * We are only interested in the sequence sync worker.
+ */
+LogicalRepWorker *
+logicalrep_sequence_sync_worker_find(Oid subid, bool only_running)
+{
+	int			i;
+	LogicalRepWorker *res = NULL;
+
+	Assert(LWLockHeldByMe(LogicalRepWorkerLock));
+
+	/* Search for attached worker for a given subscription id. */
+	for (i = 0; i < max_logical_replication_workers; i++)
+	{
+		LogicalRepWorker *w = &LogicalRepCtx->workers[i];
+
+		/* Skip parallel apply workers. */
+		if (!isSequencesyncWorker(w))
+			continue;
+
+		if (w->in_use && w->subid == subid && (only_running && w->proc))
+		{
+			res = w;
+			break;
+		}
+	}
+
+	return res;
+}
+
+/*
  * Similar to logicalrep_worker_find(), but returns a list of all workers for
  * the subscription, instead of just one.
  */
@@ -311,6 +344,7 @@ logicalrep_worker_launch(LogicalRepWorkerType wtype,
 	int			nparallelapplyworkers;
 	TimestampTz now;
 	bool		is_tablesync_worker = (wtype == WORKERTYPE_TABLESYNC);
+	bool		is_sequencesync_worker = (wtype == WORKERTYPE_SEQUENCESYNC);
 	bool		is_parallel_apply_worker = (wtype == WORKERTYPE_PARALLEL_APPLY);
 
 	/*----------
@@ -320,7 +354,7 @@ logicalrep_worker_launch(LogicalRepWorkerType wtype,
 	 * - parallel apply worker is the only kind of subworker
 	 */
 	Assert(wtype != WORKERTYPE_UNKNOWN);
-	Assert(is_tablesync_worker == OidIsValid(relid));
+	Assert(is_tablesync_worker == OidIsValid(relid) || is_sequencesync_worker == OidIsValid(relid));
 	Assert(is_parallel_apply_worker == (subworker_dsm != DSM_HANDLE_INVALID));
 
 	ereport(DEBUG1,
@@ -396,7 +430,8 @@ retry:
 	 * sync worker limit per subscription. So, just return silently as we
 	 * might get here because of an otherwise harmless race condition.
 	 */
-	if (is_tablesync_worker && nsyncworkers >= max_sync_workers_per_subscription)
+	if ((is_tablesync_worker || is_sequencesync_worker) &&
+		nsyncworkers >= max_sync_workers_per_subscription)
 	{
 		LWLockRelease(LogicalRepWorkerLock);
 		return false;
@@ -489,6 +524,15 @@ retry:
 					 subid,
 					 relid);
 			snprintf(bgw.bgw_type, BGW_MAXLEN, "logical replication tablesync worker");
+			break;
+
+		case WORKERTYPE_SEQUENCESYNC:
+			snprintf(bgw.bgw_function_name, BGW_MAXLEN, "SequencesyncWorkerMain");
+			snprintf(bgw.bgw_name, BGW_MAXLEN,
+					 "logical replication sequencesync worker for subscription %u sync %u",
+					 subid,
+					 relid);
+			snprintf(bgw.bgw_type, BGW_MAXLEN, "logical replication sequencesync worker");
 			break;
 
 		case WORKERTYPE_UNKNOWN:
@@ -1350,6 +1394,9 @@ pg_stat_get_subscription(PG_FUNCTION_ARGS)
 				break;
 			case WORKERTYPE_TABLESYNC:
 				values[9] = CStringGetTextDatum("table synchronization");
+				break;
+			case WORKERTYPE_SEQUENCESYNC:
+				values[9] = CStringGetTextDatum("sequence synchronization");
 				break;
 			case WORKERTYPE_UNKNOWN:
 				/* Should never happen. */

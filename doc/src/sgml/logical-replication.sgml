@@ -1984,8 +1984,8 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
    <para>
     <link linkend="guc-max-logical-replication-workers"><varname>max_logical_replication_workers</varname></link>
     must be set to at least the number of subscriptions (for leader apply
-    workers), plus some reserve for the table synchronization workers and
-    parallel apply workers.
+    workers), plus some reserve for the table synchronization workers, sequence
+    synchronization worker and parallel apply workers.
    </para>
 
    <para>

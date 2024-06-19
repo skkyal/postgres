@@ -27,6 +27,7 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> ADD PUBLICA
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> DROP PUBLICATION <replaceable class="parameter">publication_name</replaceable> [, ...] [ WITH ( <replaceable class="parameter">publication_option</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] ) ]
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> REFRESH PUBLICATION [ WITH ( <replaceable class="parameter">refresh_option</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] ) ]
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> ENABLE
+ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> REFRESH SEQUENCES
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> DISABLE
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> SET ( <replaceable class="parameter">subscription_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )
 ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> SKIP ( <replaceable class="parameter">skip_option</replaceable> = <replaceable class="parameter">value</replaceable> )
@@ -191,6 +192,16 @@ ALTER SUBSCRIPTION <replaceable class="parameter">name</replaceable> RENAME TO <
         </listitem>
        </varlistentry>
       </variablelist></para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry id="sql-altersubscription-params-refresh-sequences">
+    <term><literal>REFRESH SEQUENCES</literal></term>
+    <listitem>
+     <para>
+      Fetch missing sequences information from publisher and re-synchronize the
+      sequence data from the publisher.
+     </para>
     </listitem>
    </varlistentry>
 

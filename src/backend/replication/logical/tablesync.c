@@ -692,7 +692,9 @@ process_syncing_sequences_for_apply()
 {
 	ListCell   *lc;
 	bool		started_tx = false;
-
+	static bool	worker_started;
+	static TimestampTz last_start_time;
+	
 	Assert(!IsTransactionState());
 
 	/* We need up-to-date sync state info for subscription tables here. */
@@ -752,13 +754,20 @@ process_syncing_sequences_for_apply()
 			 */
 			if (nsyncworkers < max_sync_workers_per_subscription)
 			{
-				logicalrep_worker_launch(WORKERTYPE_SEQUENCESYNC,
+				TimestampTz now = GetCurrentTimestamp();
+
+				if(last_start_time && TimestampDifferenceExceeds(last_start_time, now,
+											  wal_retrieve_retry_interval))
+				{
+					logicalrep_worker_launch(WORKERTYPE_SEQUENCESYNC,
 											MyLogicalRepWorker->dbid,
 											MySubscription->oid,
 											MySubscription->name,
 											MyLogicalRepWorker->userid,
 											InvalidOid,
 											DSM_HANDLE_INVALID);
+					last_start_time = now;
+				}
 			}
 		}
 	}

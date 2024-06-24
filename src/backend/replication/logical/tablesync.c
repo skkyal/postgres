@@ -118,6 +118,7 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/rel.h"
 #include "utils/rls.h"
 #include "utils/snapmgr.h"
 #include "utils/syscache.h"
@@ -692,20 +693,59 @@ process_syncing_tables(XLogRecPtr current_lsn)
 }
 
 /*
- * Create list of columns for COPY based on logical relation mapping.
+ * Create list of columns for COPY based on logical relation mapping. Do not
+ * include generated columns, of the subscription table, in the column list.
  */
 static List *
-make_copy_attnamelist(LogicalRepRelMapEntry *rel)
+make_copy_attnamelist(LogicalRepRelMapEntry *rel, bool *attgenlist)
 {
 	List	   *attnamelist = NIL;
-	int			i;
+	bool	   *gencollist;
+	TupleDesc	desc;
 
-	for (i = 0; i < rel->remoterel.natts; i++)
+	desc = RelationGetDescr(rel->localrel);
+	gencollist = palloc0(MaxTupleAttributeNumber * sizeof(bool));
+
+	for (int i = 0; i < desc->natts; i++)
 	{
-		attnamelist = lappend(attnamelist,
-							  makeString(rel->remoterel.attnames[i]));
+		int			attnum;
+		Form_pg_attribute attr = TupleDescAttr(desc, i);
+
+		if (!attr->attgenerated)
+			continue;
+
+		attnum = logicalrep_rel_att_by_name(&rel->remoterel,
+											NameStr(attr->attname));
+
+		/*
+		 * Check if subscription table have a generated column with same
+		 * column name as a non-generated column in the corresponding
+		 * publication table.
+		 * 'gencollist' stores column if it is a generated column in
+		 * subscription table. We should not include this column in column
+		 * list for COPY.
+		 */
+		if (attnum >= 0)
+		{
+			if(!attgenlist[attnum])
+				ereport(ERROR,
+						(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+						 errmsg("logical replication target relation \"%s.%s\" has a generated column \"%s\" "
+								"but corresponding column on source relation is not a generated column",
+						 rel->remoterel.nspname, rel->remoterel.relname, NameStr(attr->attname))));
+			gencollist[attnum] = true;
+		}
 	}
 
+	/*
+	 * Construct column list for COPY.
+	 */
+	for (int i = 0; i < rel->remoterel.natts; i++)
+	{
+		if(!gencollist[i])
+			attnamelist = lappend(attnamelist,
+								  makeString(rel->remoterel.attnames[i]));
+	}
 
 	return attnamelist;
 }
@@ -791,16 +831,17 @@ copy_read_data(void *outbuf, int minread, int maxread)
  * qualifications to be used in the COPY command.
  */
 static void
-fetch_remote_table_info(char *nspname, char *relname,
+fetch_remote_table_info(char *nspname, char *relname, bool **attgenlist,
 						LogicalRepRelation *lrel, List **qual)
 {
 	WalRcvExecResult *res;
 	StringInfoData cmd;
 	TupleTableSlot *slot;
 	Oid			tableRow[] = {OIDOID, CHAROID, CHAROID};
-	Oid			attrRow[] = {INT2OID, TEXTOID, OIDOID, BOOLOID};
+	Oid			attrRow[] = {INT2OID, TEXTOID, OIDOID, BOOLOID, BOOLOID};
 	Oid			qualRow[] = {TEXTOID};
 	bool		isnull;
+	bool	   *attgenlist_res;
 	int			natt;
 	ListCell   *lc;
 	Bitmapset  *included_cols = NULL;
@@ -948,18 +989,24 @@ fetch_remote_table_info(char *nspname, char *relname,
 					 "SELECT a.attnum,"
 					 "       a.attname,"
 					 "       a.atttypid,"
-					 "       a.attnum = ANY(i.indkey)"
+					 "       a.attnum = ANY(i.indkey),"
+					 "		 a.attgenerated != ''"
 					 "  FROM pg_catalog.pg_attribute a"
 					 "  LEFT JOIN pg_catalog.pg_index i"
 					 "       ON (i.indexrelid = pg_get_replica_identity_index(%u))"
 					 " WHERE a.attnum > 0::pg_catalog.int2"
-					 "   AND NOT a.attisdropped %s"
+					 "   AND NOT a.attisdropped", lrel->remoteid);
+
+	if ((walrcv_server_version(LogRepWorkerWalRcvConn) >= 120000 &&
+		walrcv_server_version(LogRepWorkerWalRcvConn) <= 160000) ||
+		!MySubscription->includegencols)
+			appendStringInfo(&cmd, " AND a.attgenerated = ''");
+
+	appendStringInfo(&cmd,
 					 "   AND a.attrelid = %u"
 					 " ORDER BY a.attnum",
-					 lrel->remoteid,
-					 (walrcv_server_version(LogRepWorkerWalRcvConn) >= 120000 ?
-					  "AND a.attgenerated = ''" : ""),
 					 lrel->remoteid);
+
 	res = walrcv_exec(LogRepWorkerWalRcvConn, cmd.data,
 					  lengthof(attrRow), attrRow);
 
@@ -973,6 +1020,7 @@ fetch_remote_table_info(char *nspname, char *relname,
 	lrel->attnames = palloc0(MaxTupleAttributeNumber * sizeof(char *));
 	lrel->atttyps = palloc0(MaxTupleAttributeNumber * sizeof(Oid));
 	lrel->attkeys = NULL;
+	attgenlist_res = palloc0(MaxTupleAttributeNumber * sizeof(bool));
 
 	/*
 	 * Store the columns as a list of names.  Ignore those that are not
@@ -1005,6 +1053,8 @@ fetch_remote_table_info(char *nspname, char *relname,
 		if (DatumGetBool(slot_getattr(slot, 4, &isnull)))
 			lrel->attkeys = bms_add_member(lrel->attkeys, natt);
 
+		attgenlist_res[natt] = DatumGetBool(slot_getattr(slot, 5, &isnull));
+
 		/* Should never happen. */
 		if (++natt >= MaxTupleAttributeNumber)
 			elog(ERROR, "too many columns in remote table \"%s.%s\"",
@@ -1015,7 +1065,7 @@ fetch_remote_table_info(char *nspname, char *relname,
 	ExecDropSingleTupleTableSlot(slot);
 
 	lrel->natts = natt;
-
+	*attgenlist = attgenlist_res;
 	walrcv_clear_result(res);
 
 	/*
@@ -1123,10 +1173,12 @@ copy_table(Relation rel)
 	List	   *attnamelist;
 	ParseState *pstate;
 	List	   *options = NIL;
+	bool 	   *attgenlist;
 
 	/* Get the publisher relation info. */
 	fetch_remote_table_info(get_namespace_name(RelationGetNamespace(rel)),
-							RelationGetRelationName(rel), &lrel, &qual);
+							RelationGetRelationName(rel), &attgenlist,
+							&lrel, &qual);
 
 	/* Put the relation into relmap. */
 	logicalrep_relmap_update(&lrel);
@@ -1135,11 +1187,17 @@ copy_table(Relation rel)
 	relmapentry = logicalrep_rel_open(lrel.remoteid, NoLock);
 	Assert(rel == relmapentry->localrel);
 
+	attnamelist = make_copy_attnamelist(relmapentry, attgenlist);
+
 	/* Start copy on the publisher. */
 	initStringInfo(&cmd);
 
-	/* Regular table with no row filter */
-	if (lrel.relkind == RELKIND_RELATION && qual == NIL)
+	/*
+	 * Regular table with no row filter and 'include_generated_columns'
+	 * specified as 'false' during creation of subscription.
+	 */
+	if (lrel.relkind == RELKIND_RELATION && qual == NIL &&
+		!MySubscription->includegencols)
 	{
 		appendStringInfo(&cmd, "COPY %s",
 						 quote_qualified_identifier(lrel.nspname, lrel.relname));
@@ -1169,17 +1227,21 @@ copy_table(Relation rel)
 	else
 	{
 		/*
-		 * For non-tables and tables with row filters, we need to do COPY
-		 * (SELECT ...), but we can't just do SELECT * because we need to not
-		 * copy generated columns. For tables with any row filters, build a
-		 * SELECT query with OR'ed row filters for COPY.
+		 * For non-tables and tables with row filters and when
+		 * 'include_generated_columns' is specified as 'true', we need to do
+		 * COPY (SELECT ...), as normal COPY of generated column is not
+		 * supported. For tables with any row filters, build a SELECT query
+		 * with OR'ed row filters for COPY.
 		 */
+		int i = 0;
+
 		appendStringInfoString(&cmd, "COPY (SELECT ");
-		for (int i = 0; i < lrel.natts; i++)
+		foreach_ptr(ListCell, l, attnamelist)
 		{
-			appendStringInfoString(&cmd, quote_identifier(lrel.attnames[i]));
-			if (i < lrel.natts - 1)
+			appendStringInfoString(&cmd, quote_identifier(strVal(l)));
+			if (i < attnamelist->length - 1)
 				appendStringInfoString(&cmd, ", ");
+			i++;
 		}
 
 		appendStringInfoString(&cmd, " FROM ");
@@ -1237,7 +1299,6 @@ copy_table(Relation rel)
 	(void) addRangeTableEntryForRelation(pstate, rel, AccessShareLock,
 										 NULL, false, false);
 
-	attnamelist = make_copy_attnamelist(relmapentry);
 	cstate = BeginCopyFrom(pstate, rel, NULL, NULL, false, copy_read_data, attnamelist, options);
 
 	/* Do the copy */

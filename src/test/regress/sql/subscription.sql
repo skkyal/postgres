@@ -60,9 +60,6 @@ CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PU
 CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, enabled = false);
 CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, create_slot = false);
 
--- fail - copy_data and include_generated_columns are mutually exclusive options
-CREATE SUBSCRIPTION sub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (include_generated_columns = true);
-
 -- fail - include_generated_columns must be boolean
 CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, include_generated_columns = foo);
 

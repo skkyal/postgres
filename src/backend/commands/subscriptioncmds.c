@@ -459,20 +459,6 @@ parse_subscription_options(ParseState *pstate, List *stmt_options,
 								"slot_name = NONE", "create_slot = false")));
 		}
 	}
-
-	/*
-	 * Do additional checking for disallowed combination when copy_data and
-	 * include_generated_columns are true. COPY of generated columns is not supported
-	 * yet.
-	 */
-	if (opts->copy_data && opts->include_generated_columns)
-	{
-		ereport(ERROR,
-				errcode(ERRCODE_SYNTAX_ERROR),
-		/*- translator: both %s are strings of the form "option = value" */
-					errmsg("%s and %s are mutually exclusive options",
-						"copy_data = true", "include_generated_columns = true"));
-	}
 }
 
 /*

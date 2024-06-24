@@ -442,6 +442,10 @@ CREATE SUBSCRIPTION <replaceable class="parameter">subscription_name</replaceabl
           has no effect; the subscriber column will be filled as normal with the
           subscriber-side computed or default data.
          </para>
+         <para>
+         This parameter can only be set <literal>true</literal> if <literal>copy_data</literal> is
+         set to <literal>false</literal>.
+         </para>
         </listitem>
        </varlistentry>
       </variablelist></para>

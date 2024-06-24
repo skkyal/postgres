@@ -205,7 +205,7 @@ logicalrep_relmap_update(LogicalRepRelation *remoterel)
  *
  * Returns -1 if not found.
  */
-static int
+int
 logicalrep_rel_att_by_name(LogicalRepRelation *remoterel, const char *attname)
 {
 	int			i;
@@ -421,7 +421,8 @@ logicalrep_rel_open(LogicalRepRelId remoteid, LOCKMODE lockmode)
 			int			attnum;
 			Form_pg_attribute attr = TupleDescAttr(desc, i);
 
-			if (attr->attisdropped)
+			if (attr->attisdropped ||
+				(!MySubscription->includegencols && attr->attgenerated))
 			{
 				entry->attrmap->attnums[i] = -1;
 				continue;

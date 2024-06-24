@@ -99,9 +99,6 @@ CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PU
 ERROR:  subscription with slot_name = NONE must also set create_slot = false
 CREATE SUBSCRIPTION regress_testsub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (slot_name = NONE, create_slot = false);
 ERROR:  subscription with slot_name = NONE must also set enabled = false
--- fail - copy_data and include_generated_columns are mutually exclusive options
-CREATE SUBSCRIPTION sub2 CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (include_generated_columns = true);
-ERROR:  copy_data = true and include_generated_columns = true are mutually exclusive options
 -- fail - include_generated_columns must be boolean
 CREATE SUBSCRIPTION regress_testsub CONNECTION 'dbname=regress_doesnotexist' PUBLICATION testpub WITH (connect = false, include_generated_columns = foo);
 ERROR:  include_generated_columns requires a Boolean value

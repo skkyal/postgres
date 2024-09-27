@@ -160,6 +160,9 @@
  */
 #define CatCacheMsgs 0
 #define RelCacheMsgs 1
+#define PubCacheMsgs 2
+
+#define NumberofCache 3
 
 /* Pointers to main arrays in TopTransactionContext */
 typedef struct InvalMessageArray
@@ -168,13 +171,13 @@ typedef struct InvalMessageArray
 	int			maxmsgs;		/* current allocated size of array */
 } InvalMessageArray;
 
-static InvalMessageArray InvalMessageArrays[2];
+static InvalMessageArray InvalMessageArrays[NumberofCache];
 
 /* Control information for one logical group of messages */
 typedef struct InvalidationMsgsGroup
 {
-	int			firstmsg[2];	/* first index in relevant array */
-	int			nextmsg[2];		/* last+1 index */
+	int			firstmsg[NumberofCache];	/* first index in relevant array */
+	int			nextmsg[NumberofCache];		/* last+1 index */
 } InvalidationMsgsGroup;
 
 /* Macros to help preserve InvalidationMsgsGroup abstraction */
@@ -189,6 +192,7 @@ typedef struct InvalidationMsgsGroup
 	do { \
 		SetSubGroupToFollow(targetgroup, priorgroup, CatCacheMsgs); \
 		SetSubGroupToFollow(targetgroup, priorgroup, RelCacheMsgs); \
+		SetSubGroupToFollow(targetgroup, priorgroup, PubCacheMsgs); \
 	} while (0)
 
 #define NumMessagesInSubGroup(group, subgroup) \
@@ -196,7 +200,8 @@ typedef struct InvalidationMsgsGroup
 
 #define NumMessagesInGroup(group) \
 	(NumMessagesInSubGroup(group, CatCacheMsgs) + \
-	 NumMessagesInSubGroup(group, RelCacheMsgs))
+	 NumMessagesInSubGroup(group, RelCacheMsgs) + \
+	 NumMessagesInSubGroup(group, PubCacheMsgs))
 
 
 /*----------------
@@ -251,6 +256,7 @@ int			debug_discard_caches = 0;
 
 #define MAX_SYSCACHE_CALLBACKS 64
 #define MAX_RELCACHE_CALLBACKS 10
+#define MAX_PUBCACHE_CALLBACKS 10
 
 static struct SYSCACHECALLBACK
 {
@@ -271,6 +277,14 @@ static struct RELCACHECALLBACK
 }			relcache_callback_list[MAX_RELCACHE_CALLBACKS];
 
 static int	relcache_callback_count = 0;
+
+static struct PUBCACHECALLBACK
+{
+	PubcacheCallbackFunction function;
+	Datum		arg;
+}			pubcache_callback_list[MAX_PUBCACHE_CALLBACKS];
+
+static int	pubcache_callback_count = 0;
 
 /* ----------------------------------------------------------------
  *				Invalidation subgroup support functions
@@ -465,6 +479,38 @@ AddRelcacheInvalidationMessage(InvalidationMsgsGroup *group,
 }
 
 /*
+ * Add a publication inval entry
+ */
+static void
+AddPubcacheInvalidationMessage(InvalidationMsgsGroup *group,
+							   Oid dbId, Oid pubId)
+{
+	SharedInvalidationMessage msg;
+
+	/*
+	 * Don't add a duplicate item. We assume dbId need not be checked because
+	 * it will never change. InvalidOid for relId means all relations so we
+	 * don't need to add individual ones when it is present.
+	 */
+
+	ProcessMessageSubGroup(group, PubCacheMsgs,
+						   if (msg->pc.id == SHAREDINVALPUBCACHE_ID &&
+							   (msg->pc.pubId == pubId ||
+								msg->pc.pubId == InvalidOid))
+						   return);
+
+
+	/* OK, add the item */
+	msg.pc.id = SHAREDINVALPUBCACHE_ID;
+	msg.pc.dbId = dbId;
+	msg.pc.pubId = pubId;
+	/* check AddCatcacheInvalidationMessage() for an explanation */
+	VALGRIND_MAKE_MEM_DEFINED(&msg, sizeof(msg));
+
+	AddInvalidationMessage(group, PubCacheMsgs, &msg);
+}
+
+/*
  * Add a snapshot inval entry
  *
  * We put these into the relcache subgroup for simplicity.
@@ -502,6 +548,7 @@ AppendInvalidationMessages(InvalidationMsgsGroup *dest,
 {
 	AppendInvalidationMessageSubGroup(dest, src, CatCacheMsgs);
 	AppendInvalidationMessageSubGroup(dest, src, RelCacheMsgs);
+	AppendInvalidationMessageSubGroup(dest, src, PubCacheMsgs);
 }
 
 /*
@@ -516,6 +563,7 @@ ProcessInvalidationMessages(InvalidationMsgsGroup *group,
 {
 	ProcessMessageSubGroup(group, CatCacheMsgs, func(msg));
 	ProcessMessageSubGroup(group, RelCacheMsgs, func(msg));
+	ProcessMessageSubGroup(group, PubCacheMsgs, func(msg));
 }
 
 /*
@@ -528,6 +576,7 @@ ProcessInvalidationMessagesMulti(InvalidationMsgsGroup *group,
 {
 	ProcessMessageSubGroupMulti(group, CatCacheMsgs, func(msgs, n));
 	ProcessMessageSubGroupMulti(group, RelCacheMsgs, func(msgs, n));
+	ProcessMessageSubGroupMulti(group, PubCacheMsgs, func(msgs, n));
 }
 
 /* ----------------------------------------------------------------
@@ -588,6 +637,18 @@ RegisterRelcacheInvalidation(Oid dbId, Oid relId)
 	 */
 	if (relId == InvalidOid || RelationIdIsInInitFile(relId))
 		transInvalInfo->RelcacheInitFileInval = true;
+}
+
+/*
+ * RegisterPubcacheInvalidation
+ *
+ * As above, but register a publication invalidation event.
+ */
+static void
+RegisterPubcacheInvalidation(Oid dbId, Oid pubId)
+{
+	AddPubcacheInvalidationMessage(&transInvalInfo->CurrentCmdInvalidMsgs,
+								   dbId, pubId);
 }
 
 /*
@@ -660,6 +721,8 @@ PrepareInvalidationState(void)
 		InvalMessageArrays[CatCacheMsgs].maxmsgs = 0;
 		InvalMessageArrays[RelCacheMsgs].msgs = NULL;
 		InvalMessageArrays[RelCacheMsgs].maxmsgs = 0;
+		InvalMessageArrays[PubCacheMsgs].msgs = NULL;
+		InvalMessageArrays[PubCacheMsgs].maxmsgs = 0;
 	}
 
 	transInvalInfo = myInfo;
@@ -772,6 +835,20 @@ LocalExecuteInvalidationMessage(SharedInvalidationMessage *msg)
 			InvalidateCatalogSnapshot();
 		else if (msg->sn.dbId == MyDatabaseId)
 			InvalidateCatalogSnapshot();
+	}
+	else if (msg->id == SHAREDINVALPUBCACHE_ID)
+	{
+		if (msg->pc.dbId == MyDatabaseId || msg->pc.dbId == InvalidOid)
+		{
+			int			i;
+
+			for (i = 0; i < pubcache_callback_count; i++)
+			{
+				struct PUBCACHECALLBACK *pcitem = pubcache_callback_list + i;
+
+				pcitem->function(pcitem->arg, msg->pc.pubId);
+			}
+		}
 	}
 	else
 		elog(FATAL, "unrecognized SI message ID: %d", msg->id);
@@ -940,6 +1017,18 @@ xactGetCommittedInvalidationMessages(SharedInvalidationMessage **msgs,
 								 nmsgs += n));
 	ProcessMessageSubGroupMulti(&transInvalInfo->CurrentCmdInvalidMsgs,
 								RelCacheMsgs,
+								(memcpy(msgarray + nmsgs,
+										msgs,
+										n * sizeof(SharedInvalidationMessage)),
+								 nmsgs += n));
+	ProcessMessageSubGroupMulti(&transInvalInfo->PriorCmdInvalidMsgs,
+								PubCacheMsgs,
+								(memcpy(msgarray + nmsgs,
+										msgs,
+										n * sizeof(SharedInvalidationMessage)),
+								 nmsgs += n));
+	ProcessMessageSubGroupMulti(&transInvalInfo->CurrentCmdInvalidMsgs,
+								PubCacheMsgs,
 								(memcpy(msgarray + nmsgs,
 										msgs,
 										n * sizeof(SharedInvalidationMessage)),
@@ -1312,6 +1401,17 @@ CacheInvalidateHeapTuple(Relation relation,
 		else
 			return;
 	}
+	else if (tupleRelId == PublicationRelationId)
+	{
+		Form_pg_publication pubtup = (Form_pg_publication) GETSTRUCT(tuple);
+
+		/* get publication id */
+		relationId = pubtup->oid;
+		databaseId = MyDatabaseId;
+
+		RegisterPubcacheInvalidation(databaseId, relationId);
+		return;
+	}
 	else
 		return;
 
@@ -1568,6 +1668,25 @@ CacheRegisterRelcacheCallback(RelcacheCallbackFunction func,
 }
 
 /*
+ * CacheRegisterPubcacheCallback
+ *		Register the specified function to be called for all future
+ *		publication invalidation events.  The OID of the publication being
+ *		invalidated will be passed to the function.
+ */
+void
+CacheRegisterPubcacheCallback(PubcacheCallbackFunction func,
+							  Datum arg)
+{
+	if (pubcache_callback_count >= MAX_PUBCACHE_CALLBACKS)
+		elog(FATAL, "out of pubcache_callback_list slots");
+
+	pubcache_callback_list[pubcache_callback_count].function = func;
+	pubcache_callback_list[pubcache_callback_count].arg = arg;
+
+	++pubcache_callback_count;
+}
+
+/*
  * CallSyscacheCallbacks
  *
  * This is exported so that CatalogCacheFlushCatalog can call it, saving
@@ -1627,6 +1746,9 @@ LogLogicalInvalidations(void)
 									XLogRegisterData((char *) msgs,
 													 n * sizeof(SharedInvalidationMessage)));
 		ProcessMessageSubGroupMulti(group, RelCacheMsgs,
+									XLogRegisterData((char *) msgs,
+													 n * sizeof(SharedInvalidationMessage)));
+		ProcessMessageSubGroupMulti(group, PubCacheMsgs,
 									XLogRegisterData((char *) msgs,
 													 n * sizeof(SharedInvalidationMessage)));
 		XLogInsert(RM_XACT_ID, XLOG_XACT_INVALIDATIONS);

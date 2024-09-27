@@ -110,6 +110,14 @@ typedef struct
 	Oid			relId;			/* relation ID */
 } SharedInvalSnapshotMsg;
 
+#define SHAREDINVALPUBCACHE_ID	(-6)
+typedef struct
+{
+	int8		id;				/* type field --- must be first */
+	Oid			dbId;			/* database ID, or 0 if a shared relation */
+	Oid			pubId;			/* publication ID */
+} SharedInvalPubcacheMsg;
+
 typedef union
 {
 	int8		id;				/* type field --- must be first */
@@ -119,6 +127,7 @@ typedef union
 	SharedInvalSmgrMsg sm;
 	SharedInvalRelmapMsg rm;
 	SharedInvalSnapshotMsg sn;
+	SharedInvalPubcacheMsg pc;
 } SharedInvalidationMessage;
 
 

@@ -132,6 +132,8 @@ typedef struct RelationSyncEntry
 	List	   *streamed_txns;	/* streamed toplevel transactions with this
 								 * schema */
 
+	List	   *pub_ids;
+
 	/* are we publishing this rel? */
 	PublicationActions pubactions;
 
@@ -216,6 +218,7 @@ static RelationSyncEntry *get_rel_sync_entry(PGOutputData *data,
 static void rel_sync_cache_relation_cb(Datum arg, Oid relid);
 static void rel_sync_cache_publication_cb(Datum arg, int cacheid,
 										  uint32 hashvalue);
+static void rel_sync_cache_publicationrel_cb(Datum arg, Oid pubid);
 static void set_schema_sent_in_streamed_txn(RelationSyncEntry *entry,
 											TransactionId xid);
 static bool get_schema_sent_in_streamed_txn(RelationSyncEntry *entry,
@@ -1134,7 +1137,7 @@ init_tuple_slot(PGOutputData *data, Relation relation,
 	TupleDesc	oldtupdesc;
 	TupleDesc	newtupdesc;
 
-	oldctx = MemoryContextSwitchTo(data->cachectx);
+	oldctx = MemoryContextSwitchTo(CacheMemoryContext);
 
 	/*
 	 * Create tuple table slots. Create a copy of the TupleDesc as it needs to
@@ -1739,12 +1742,6 @@ static void
 publication_invalidation_cb(Datum arg, int cacheid, uint32 hashvalue)
 {
 	publications_valid = false;
-
-	/*
-	 * Also invalidate per-relation cache so that next time the filtering info
-	 * is checked it will be updated with the new publication settings.
-	 */
-	rel_sync_cache_publication_cb(arg, cacheid, hashvalue);
 }
 
 /*
@@ -1920,17 +1917,7 @@ init_rel_sync_cache(MemoryContext cachectx)
 								  rel_sync_cache_publication_cb,
 								  (Datum) 0);
 
-	/*
-	 * Flush all cache entries after any publication changes.  (We need no
-	 * callback entry for pg_publication, because publication_invalidation_cb
-	 * will take care of it.)
-	 */
-	CacheRegisterSyscacheCallback(PUBLICATIONRELMAP,
-								  rel_sync_cache_publication_cb,
-								  (Datum) 0);
-	CacheRegisterSyscacheCallback(PUBLICATIONNAMESPACEMAP,
-								  rel_sync_cache_publication_cb,
-								  (Datum) 0);
+	CacheRegisterPubcacheCallback(rel_sync_cache_publicationrel_cb, (Datum) 0);
 
 	relation_callbacks_registered = true;
 }
@@ -2000,6 +1987,7 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		entry->publish_as_relid = InvalidOid;
 		entry->columns = NULL;
 		entry->attrmap = NULL;
+		entry->pub_ids = NIL;
 	}
 
 	/* Validate the entry */
@@ -2044,6 +2032,8 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		entry->schema_sent = false;
 		list_free(entry->streamed_txns);
 		entry->streamed_txns = NIL;
+		list_free(entry->pub_ids);
+		entry->pub_ids = NIL;
 		bms_free(entry->columns);
 		entry->columns = NULL;
 		entry->pubactions.pubinsert = false;
@@ -2108,6 +2098,10 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 
 					pub_relid = llast_oid(ancestors);
 					ancestor_level = list_length(ancestors);
+
+					oldctx = MemoryContextSwitchTo(CacheMemoryContext);
+					entry->pub_ids = lappend_oid(entry->pub_ids, pub->oid);
+					MemoryContextSwitchTo(oldctx);
 				}
 			}
 
@@ -2145,7 +2139,12 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 				if (list_member_oid(pubids, pub->oid) ||
 					list_member_oid(schemaPubids, pub->oid) ||
 					ancestor_published)
+				{
 					publish = true;
+					oldctx = MemoryContextSwitchTo(CacheMemoryContext);
+					entry->pub_ids = lappend_oid(entry->pub_ids, pub->oid);
+					MemoryContextSwitchTo(oldctx);
+				}
 			}
 
 			/*
@@ -2314,6 +2313,29 @@ rel_sync_cache_relation_cb(Datum arg, Oid relid)
 		while ((entry = (RelationSyncEntry *) hash_seq_search(&status)) != NULL)
 		{
 			entry->replicate_valid = false;
+		}
+	}
+}
+
+/*
+ * Publication invalidation callback
+ */
+static void
+rel_sync_cache_publicationrel_cb(Datum arg, Oid pubid)
+{
+	HASH_SEQ_STATUS status;
+	RelationSyncEntry *entry;
+
+	if (RelationSyncCache == NULL)
+		return;
+
+	hash_seq_init(&status, RelationSyncCache);
+	while ((entry = (RelationSyncEntry *) hash_seq_search(&status)) != NULL)
+	{
+		if (entry->replicate_valid && list_member_oid(entry->pub_ids, pubid))
+		{
+			entry->replicate_valid = false;
+			entry->pub_ids = NIL;
 		}
 	}
 }

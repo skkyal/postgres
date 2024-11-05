@@ -444,6 +444,109 @@ pub_collist_contains_invalid_column(Oid pubid, Relation relation, List *ancestor
 	return result;
 }
 
+/*
+ * Check if REPLICA IDENTITY consists of any unpublished generated column.
+ *
+ * Returns true if any replica identity column is an unpublished generated column.
+ */
+bool
+replident_has_unpublished_gen_col(Oid pubid, Relation relation, List *ancestors,
+								  bool pubviaroot)
+{
+	HeapTuple	tuple;
+	Oid			relid = RelationGetRelid(relation);
+	Oid			publish_as_relid = RelationGetRelid(relation);
+	bool		result = false;
+	bool		isnull;
+
+	/*
+	 * For a partition, if pubviaroot is true, find the topmost ancestor that
+	 * is published via this publication as we need to use its column list for
+	 * the changes.
+	 *
+	 * Note that even though the column list used is for an ancestor, the
+	 * REPLICA IDENTITY used will be for the actual child table.
+	 */
+	if (pubviaroot && relation->rd_rel->relispartition)
+	{
+		publish_as_relid = GetTopMostAncestorInPublication(pubid, ancestors, NULL);
+
+		if (!OidIsValid(publish_as_relid))
+			publish_as_relid = relid;
+	}
+
+	tuple = SearchSysCache2(PUBLICATIONRELMAP,
+							ObjectIdGetDatum(publish_as_relid),
+							ObjectIdGetDatum(pubid));
+
+	if (!HeapTupleIsValid(tuple))
+		return false;
+
+	(void) SysCacheGetAttr(PUBLICATIONRELMAP, tuple,
+						   Anum_pg_publication_rel_prattrs,
+						   &isnull);
+
+	if(isnull)
+	{
+		int			x;
+		Bitmapset  *idattrs = NULL;
+
+		idattrs = RelationGetIndexAttrBitmap(relation,
+											 INDEX_ATTR_BITMAP_IDENTITY_KEY);
+
+		x = -1;
+
+		/*
+		 * Check if any REPLICA IDENTITY column is an generated column.
+		 */
+		while ((x = bms_next_member(idattrs, x)) >= 0)
+		{
+			AttrNumber	attnum = (x + FirstLowInvalidHeapAttributeNumber);
+			char attgenerated = get_attgenerated(relid, attnum);
+
+			/*
+			 * If pubviaroot is true, we are validating the column list of the
+			 * parent table, but the bitmap contains the replica identity
+			 * information of the child table. The parent/child attnums may
+			 * not match, so translate them to the parent - get the attname
+			 * from the child, and look it up in the parent.
+			 */
+			if (pubviaroot)
+			{
+				/* attribute name in the child table */
+				char	   *colname = get_attname(relid, attnum, false);
+
+				/*
+				 * Determine the attnum for the attribute name in parent (we
+				 * are using the column list defined on the parent).
+				 */
+				attnum = get_attnum(publish_as_relid, colname);
+				attgenerated = get_attgenerated(publish_as_relid, attnum);
+			}
+
+			/*
+			 * Check if the column is a generated column.
+			 *
+			 * 'publish_generated_columns = false' and no column list is
+			 * specified for publication. So if the column is a generated
+			 * column, this implies that the REPLICA IDENTITY consists an
+			 * unpublished generated column.
+			 */
+			if (attgenerated == ATTRIBUTE_GENERATED_STORED)
+			{
+				result = true;
+				break;
+			}
+		}
+
+		bms_free(idattrs);
+	}
+
+	ReleaseSysCache(tuple);
+
+	return result;
+}
+
 /* check_functions_in_node callback */
 static bool
 contain_mutable_or_user_functions_checker(Oid func_id, void *context)

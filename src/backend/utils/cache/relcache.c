@@ -5736,6 +5736,7 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 		pubdesc->rf_valid_for_delete = true;
 		pubdesc->cols_valid_for_update = true;
 		pubdesc->cols_valid_for_delete = true;
+		pubdesc->replident_has_valid_gen_cols = true;
 		return;
 	}
 
@@ -5750,6 +5751,7 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 	pubdesc->rf_valid_for_delete = true;
 	pubdesc->cols_valid_for_update = true;
 	pubdesc->cols_valid_for_delete = true;
+	pubdesc->replident_has_valid_gen_cols = true;
 
 	/* Fetch the publication membership info. */
 	puboids = GetRelationPublications(relid);
@@ -5825,6 +5827,20 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 				pubdesc->cols_valid_for_update = false;
 			if (pubform->pubdelete)
 				pubdesc->cols_valid_for_delete = false;
+		}
+
+		/*
+		 * Check if all columns which are part of the REPLICA IDENTITY is
+		 * published.
+		 *
+		 * If the publication is FOR ALL TABLES we can skip the validation.
+		 */
+		if (!pubform->puballtables && !pubform->pubgencols &&
+			(pubform->pubupdate || pubform->pubdelete) &&
+			replident_has_unpublished_gen_col(pubid, relation, ancestors,
+											  pubform->pubviaroot))
+		{
+			pubdesc->replident_has_valid_gen_cols = false;
 		}
 
 		ReleaseSysCache(tup);

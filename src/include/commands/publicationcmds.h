@@ -35,5 +35,7 @@ extern bool pub_rf_contains_invalid_column(Oid pubid, Relation relation,
 										   List *ancestors, bool pubviaroot);
 extern bool pub_collist_contains_invalid_column(Oid pubid, Relation relation,
 												List *ancestors, bool pubviaroot);
+extern bool replident_has_unpublished_gen_col(Oid pubid, Relation relation,
+												List *ancestors, bool pubviaroot);
 
 #endif							/* PUBLICATIONCMDS_H */

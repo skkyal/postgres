@@ -1790,6 +1790,8 @@ CallSyscacheCallbacks(int cacheid, uint32 hashvalue)
  *
  * This is currently only used for logging invalidations at the command end
  * or at commit time if any invalidations are pending.
+ *
+ * XXX: Can we suppress to log invalidation messages?
  */
 void
 LogLogicalInvalidations(void)

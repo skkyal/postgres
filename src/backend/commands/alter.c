@@ -400,6 +400,9 @@ ExecRenameStmt(RenameStmt *stmt)
 		case OBJECT_TYPE:
 			return RenameType(stmt);
 
+		case OBJECT_PUBLICATION:
+			return RenamePublication(stmt->subname, stmt->newname);
+
 		case OBJECT_AGGREGATE:
 		case OBJECT_COLLATION:
 		case OBJECT_CONVERSION:
@@ -417,7 +420,6 @@ ExecRenameStmt(RenameStmt *stmt)
 		case OBJECT_TSDICTIONARY:
 		case OBJECT_TSPARSER:
 		case OBJECT_TSTEMPLATE:
-		case OBJECT_PUBLICATION:
 		case OBJECT_SUBSCRIPTION:
 			{
 				ObjectAddress address;

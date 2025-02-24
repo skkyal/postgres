@@ -128,6 +128,7 @@
 #include "access/heapam_xlog.h"
 #include "access/transam.h"
 #include "access/xact.h"
+#include "catalog/syscache_ids.h"
 #include "common/file_utils.h"
 #include "miscadmin.h"
 #include "pgstat.h"
@@ -162,6 +163,9 @@ static void SnapBuildFreeSnapshot(Snapshot snap);
 static void SnapBuildSnapIncRefcount(Snapshot snap);
 
 static void SnapBuildDistributeSnapshotAndInval(SnapBuild *builder, XLogRecPtr lsn, TransactionId xid);
+
+static void FilterInvalidations(ReorderBufferTXN *txn, uint32 *curr_ninvals,
+								SharedInvalidationMessage **curr_invals);
 
 static inline bool SnapBuildXidHasCatalogChanges(SnapBuild *builder, TransactionId xid,
 												 uint32 xinfo);
@@ -733,6 +737,9 @@ SnapBuildDistributeSnapshotAndInval(SnapBuild *builder, XLogRecPtr lsn, Transact
 	dlist_iter	txn_i;
 	ReorderBufferTXN *txn;
 	ReorderBufferTXN *curr_txn;
+	uint32 curr_ninvals = 0;
+	SharedInvalidationMessage *curr_invals = NULL;
+	bool is_filter_done = false;
 
 	curr_txn = ReorderBufferTXNByXid(builder->reorder, xid, false, NULL, InvalidXLogRecPtr, false);
 
@@ -783,8 +790,122 @@ SnapBuildDistributeSnapshotAndInval(SnapBuild *builder, XLogRecPtr lsn, Transact
 		 * transactions except the current committed transaction
 		 */
 		if (txn->xid != xid && curr_txn->ninvalidations > 0)
-			ReorderBufferAddInvalidations(builder->reorder, txn->xid, lsn,
-										  curr_txn->ninvalidations, curr_txn->invalidations);
+		{
+			/*
+			 * Filter out the invalidations to be distributed to all toplevel
+			 * transaction. If this is called first time the required invalidations
+			 * are filter and stored.
+			 */
+			if (!is_filter_done)
+			{
+				FilterInvalidations(curr_txn, &curr_ninvals, &curr_invals);
+				is_filter_done = true;
+			}
+
+			/*
+			 * Distribute the required invalidations to inprogress transactions.
+			 */
+			if (curr_ninvals != 0)
+				ReorderBufferAddInvalidations(builder->reorder, txn->xid, lsn,
+											  curr_ninvals, curr_invals);
+		}
+	}
+}
+
+/*
+ * Filter the invalidations messages to be distributed to inprogress
+ * transactions
+ */
+static void
+FilterInvalidations(ReorderBufferTXN *txn, uint32 *curr_ninvals,
+					SharedInvalidationMessage **curr_invals)
+{
+	for(uint32 i = 0; i < txn->ninvalidations; i++)
+	{
+		SharedInvalidationMessage *msg = txn->invalidations + i;
+
+		/* Relmap and smgr invalidation messages won't be serialized */
+		Assert(msg->id != SHAREDINVALRELMAP_ID &&
+			   msg->id != SHAREDINVALSMGR_ID);
+
+		/*
+		 * Catcache inval message: we can extract invalidation messages which
+		 * must be propagated.
+		 */
+		if (msg->id >= 0)
+		{
+			bool isvalid = true;
+
+			/* Skip if the invalidation message is not for the decoding database */
+			if (!(msg->cc.dbId == MyDatabaseId || msg->cc.dbId == InvalidOid))
+				continue;
+
+			switch (msg->cc.id)
+			{
+				case ATTNAME:
+				case ATTNUM:
+				case NAMESPACENAME:
+				case NAMESPACEOID:
+				case PUBLICATIONNAME:
+				case PUBLICATIONOID:
+				case PUBLICATIONNAMESPACE:
+				case PUBLICATIONNAMESPACEMAP:
+				case PUBLICATIONREL:
+				case PUBLICATIONRELMAP:
+				case RELNAMENSP:
+				case RELOID:
+					break;
+
+				default:
+					isvalid = false;
+					break;
+			}
+
+			if(!isvalid)
+				continue;
+		}
+
+		/*
+		 * Whole-catalog inval message: We can extract few inval messages.
+		 * Maybe same catalogs as catcache?
+		 */
+		else if (msg->id == SHAREDINVALCATALOG_ID)
+		{
+			if (!(msg->cc.dbId == MyDatabaseId || msg->cc.dbId == InvalidOid))
+				continue;
+		}
+
+		/*
+		 * Relcache inval message: ignore if the database is not decoding
+		 * one.
+		 */
+		else if (msg->id == SHAREDINVALRELCACHE_ID)
+		{
+			if (!(msg->cc.dbId == MyDatabaseId || msg->cc.dbId == InvalidOid))
+				continue;
+		}
+
+		/* Snapshot inval message: theoretically not needed */
+		else if (msg->id == SHAREDINVALSNAPSHOT_ID)
+			continue;
+
+		/* Fallback: should not come */
+		else
+			Assert(false);
+
+		if (*curr_ninvals == 0)
+		{
+			*curr_invals = (SharedInvalidationMessage *) palloc(sizeof(SharedInvalidationMessage));
+			memcpy(*curr_invals, msg, sizeof(SharedInvalidationMessage));
+		}
+		else
+		{
+			*curr_invals = (SharedInvalidationMessage *)
+						   repalloc(*curr_invals, sizeof(SharedInvalidationMessage) * (*curr_ninvals + 1));
+			memcpy(*curr_invals + *curr_ninvals, msg, sizeof(SharedInvalidationMessage));
+		}
+
+		(*curr_ninvals)++;
 	}
 }
 

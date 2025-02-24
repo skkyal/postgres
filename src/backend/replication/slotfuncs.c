@@ -682,6 +682,7 @@ copy_replication_slot(FunctionCallInfo fcinfo, bool logical_slot)
 	ReplicationSlot second_slot_contents;
 	XLogRecPtr	src_restart_lsn;
 	bool		src_islogical;
+	bool		src_isinvalidated;
 	bool		temporary;
 	char	   *plugin;
 	Datum		values[2];
@@ -739,6 +740,7 @@ copy_replication_slot(FunctionCallInfo fcinfo, bool logical_slot)
 	src_restart_lsn = first_slot_contents.data.restart_lsn;
 	temporary = (first_slot_contents.data.persistency == RS_TEMPORARY);
 	plugin = logical_slot ? NameStr(first_slot_contents.data.plugin) : NULL;
+	src_isinvalidated = (first_slot_contents.data.invalidated != RS_INVAL_NONE);
 
 	/* Check type of replication slot */
 	if (src_islogical != logical_slot)
@@ -755,6 +757,13 @@ copy_replication_slot(FunctionCallInfo fcinfo, bool logical_slot)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot copy a replication slot that doesn't reserve WAL")));
+
+	/* Cannot copy an invalidated replication slot */
+	if (src_isinvalidated)
+		ereport(ERROR,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("cannot copy invalidated replication slot \"%s\"",
+					   NameStr(*src_name)));
 
 	/* Overwrite params from optional arguments */
 	if (PG_NARGS() >= 3)
@@ -842,6 +851,13 @@ copy_replication_slot(FunctionCallInfo fcinfo, bool logical_slot)
 					 errmsg("cannot copy unfinished logical replication slot \"%s\"",
 							NameStr(*src_name)),
 					 errhint("Retry when the source replication slot's confirmed_flush_lsn is valid.")));
+
+		/* Check if source slot became invalidated during the copy operation */
+		if (second_slot_contents.data.invalidated != RS_INVAL_NONE)
+			ereport(ERROR,
+					errmsg("cannot copy replication slot \"%s\"",
+						   NameStr(*src_name)),
+					errdetail("The source replication slot was invalidated during the copy operation."));
 
 		/* Install copied values again */
 		SpinLockAcquire(&MyReplicationSlot->mutex);

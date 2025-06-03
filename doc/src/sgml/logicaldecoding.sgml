@@ -47,7 +47,7 @@
 
    <para>
     Before you can use logical decoding, you must set
-    <xref linkend="guc-wal-level"/> to <literal>logical</literal> and
+    <xref linkend="guc-wal-level"/> to <literal>replica</literal> or higher and
     <xref linkend="guc-max-replication-slots"/> to at least 1.  Then, you
     should connect to the target database (in the example
     below, <literal>postgres</literal>) as a superuser.
@@ -257,6 +257,32 @@ postgres=# select * from pg_logical_slot_get_changes('regression_slot', NULL, NU
      log</link>, which describe changes on a storage level, into an
      application-specific form such as a stream of tuples or SQL statements.
     </para>
+
+    <para>
+     Logical decoding becomes available in two conditions:
+    </para>
+    <itemizedlist>
+     <listitem>
+      <para>
+       When <xref linkend="guc-wal-level"/> is set to <literal>logical</literal>.
+      </para>
+     </listitem>
+     <listitem>
+      <para>
+       When <xref linkend="guc-wal-level"/> is set to <literal>replica</literal>
+       and at least one logical replication slot exists on the system.
+      </para>
+     </listitem>
+    </itemizedlist>
+    <para>
+     When <varname>wal_level</varname> is set to <literal>replica</literal>,
+     logical decoding is automatically activated upon creation of the first
+     logical replication slot. This activation process involves several steps
+     and requires waiting for any concurrent transactions to finish, ensuring
+     system-wide consistency. Conversely, when the last logical replication slot
+     is dropped from a system with <varname>wal_level</varname> set to
+     <literal>replica</literal>, logical decoding is automatically disabled.
+    </para>
    </sect2>
 
    <sect2 id="logicaldecoding-replication-slots">
@@ -328,8 +354,7 @@ postgres=# select * from pg_logical_slot_get_changes('regression_slot', NULL, NU
      that could be needed by the logical decoding on the standby (as it does
      not know about the <literal>catalog_xmin</literal> on the standby).
      Existing logical slots on standby also get invalidated if
-     <varname>wal_level</varname> on the primary is reduced to less than
-     <literal>logical</literal>.
+     logical decoding becomes disabled on the primary.
      This is done as soon as the standby detects such a change in the WAL stream.
      It means that, for walsenders that are lagging (if any), some WAL records up
      to the <varname>wal_level</varname> parameter change on the primary won't be

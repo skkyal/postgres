@@ -18,6 +18,7 @@
 #include "access/xlogutils.h"
 #include "funcapi.h"
 #include "replication/logical.h"
+#include "replication/logicalctl.h"
 #include "replication/slot.h"
 #include "replication/slotsync.h"
 #include "utils/builtins.h"
@@ -135,6 +136,12 @@ create_logical_replication_slot(char *name, char *plugin,
 	ReplicationSlotCreate(name, true,
 						  temporary ? RS_TEMPORARY : RS_EPHEMERAL, two_phase,
 						  failover, false);
+
+	/*
+	 * Ensure the logical decoding is enabled before initializing the logical
+	 * decoding context.
+	 */
+	EnsureLogicalDecodingEnabled();
 
 	/*
 	 * Create logical decoding context to find start point or, if we don't

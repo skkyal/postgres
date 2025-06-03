@@ -28,7 +28,7 @@ extern bool ValidateSlotSyncParams(int elevel);
 
 pg_noreturn extern void ReplSlotSyncWorkerMain(const void *startup_data, size_t startup_data_len);
 
-extern void ShutDownSlotSync(void);
+extern void ShutDownSlotSync(bool permanent);
 extern bool SlotSyncWorkerCanRestart(void);
 extern bool IsSyncingReplicationSlots(void);
 extern Size SlotSyncShmemSize(void);

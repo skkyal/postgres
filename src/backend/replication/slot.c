@@ -48,6 +48,7 @@
 #include "pgstat.h"
 #include "postmaster/interrupt.h"
 #include "replication/logicallauncher.h"
+#include "replication/logicalctl.h"
 #include "replication/slotsync.h"
 #include "replication/slot.h"
 #include "replication/walsender_private.h"
@@ -732,16 +733,15 @@ ReplicationSlotRelease(void)
 {
 	ReplicationSlot *slot = MyReplicationSlot;
 	char	   *slotname = NULL;	/* keep compiler quiet */
-	bool		is_logical = false; /* keep compiler quiet */
+	bool		is_logical;
 	TimestampTz now = 0;
 
 	Assert(slot != NULL && slot->active_pid != 0);
 
+	is_logical = SlotIsLogical(slot);
+
 	if (am_walsender)
-	{
 		slotname = pstrdup(NameStr(slot->data.name));
-		is_logical = SlotIsLogical(slot);
-	}
 
 	if (slot->data.persistency == RS_EPHEMERAL)
 	{
@@ -751,6 +751,9 @@ ReplicationSlotRelease(void)
 		 * data.
 		 */
 		ReplicationSlotDropAcquired();
+
+		if (is_logical)
+			DisableLogicalDecodingIfNecessary();
 	}
 
 	/*
@@ -820,10 +823,13 @@ void
 ReplicationSlotCleanup(bool synced_only)
 {
 	int			i;
+	bool		dropped_logical = false;
+	int			nlogicalslots;
 
 	Assert(MyReplicationSlot == NULL);
 
 restart:
+	nlogicalslots = 0;
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 	for (i = 0; i < max_replication_slots; i++)
 	{
@@ -832,6 +838,9 @@ restart:
 		if (!s->in_use)
 			continue;
 
+		if (SlotIsLogical(s))
+			nlogicalslots++;
+
 		SpinLockAcquire(&s->mutex);
 		if ((s->active_pid == MyProcPid &&
 			 (!synced_only || s->data.synced)))
@@ -839,6 +848,9 @@ restart:
 			Assert(s->data.persistency == RS_TEMPORARY);
 			SpinLockRelease(&s->mutex);
 			LWLockRelease(ReplicationSlotControlLock);	/* avoid deadlock */
+
+			if (SlotIsLogical(s))
+				dropped_logical = true;
 
 			ReplicationSlotDropPtr(s);
 
@@ -850,6 +862,9 @@ restart:
 	}
 
 	LWLockRelease(ReplicationSlotControlLock);
+
+	if (dropped_logical && nlogicalslots == 0)
+		DisableLogicalDecodingIfNecessary();
 }
 
 /*
@@ -858,6 +873,8 @@ restart:
 void
 ReplicationSlotDrop(const char *name, bool nowait)
 {
+	bool		is_logical;
+
 	Assert(MyReplicationSlot == NULL);
 
 	ReplicationSlotAcquire(name, nowait, false);
@@ -872,7 +889,12 @@ ReplicationSlotDrop(const char *name, bool nowait)
 				errmsg("cannot drop replication slot \"%s\"", name),
 				errdetail("This replication slot is being synchronized from the primary server."));
 
+	is_logical = SlotIsLogical(MyReplicationSlot);
+
 	ReplicationSlotDropAcquired();
+
+	if (is_logical)
+		DisableLogicalDecodingIfNecessary();
 }
 
 /*
@@ -1408,11 +1430,14 @@ void
 ReplicationSlotsDropDBSlots(Oid dboid)
 {
 	int			i;
+	int			nlogicalslots;
+	bool		dropped = false;
 
 	if (max_replication_slots <= 0)
 		return;
 
 restart:
+	nlogicalslots = 0;
 	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
 	for (i = 0; i < max_replication_slots; i++)
 	{
@@ -1429,6 +1454,8 @@ restart:
 		/* only logical slots are database specific, skip */
 		if (!SlotIsLogical(s))
 			continue;
+
+		nlogicalslots++;
 
 		/* not our database, skip */
 		if (s->data.database != dboid)
@@ -1486,11 +1513,49 @@ restart:
 		 */
 		LWLockRelease(ReplicationSlotControlLock);
 		ReplicationSlotDropAcquired();
+		dropped = true;
 		goto restart;
 	}
 	LWLockRelease(ReplicationSlotControlLock);
+
+	if (dropped && nlogicalslots == 0)
+		DisableLogicalDecodingIfNecessary();
 }
 
+/*
+ * Returns true if there is at least in-use logical replication slot.
+ */
+bool
+CheckLogicalSlotExists(void)
+{
+	bool		found = false;
+
+	if (max_replication_slots <= 0)
+		return false;
+
+	LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
+	for (int i = 0; i < max_replication_slots; i++)
+	{
+		ReplicationSlot *s;
+
+		s = &ReplicationSlotCtl->replication_slots[i];
+
+		/* cannot change while ReplicationSlotCtlLock is held */
+		if (!s->in_use)
+			continue;
+
+		/* NB: intentionally counting invalidated slots */
+
+		if (SlotIsLogical(s))
+		{
+			found = true;
+			break;
+		}
+	}
+	LWLockRelease(ReplicationSlotControlLock);
+
+	return found;
+}
 
 /*
  * Check whether the server's configuration supports using replication
@@ -1651,7 +1716,7 @@ ReportSlotInvalidation(ReplicationSlotInvalidationCause cause,
 			break;
 
 		case RS_INVAL_WAL_LEVEL:
-			appendStringInfoString(&err_detail, _("Logical decoding on standby requires \"wal_level\" >= \"logical\" on the primary server."));
+			appendStringInfoString(&err_detail, _("Logical decoding on standby requires \"wal_level\" >= \"logical\" or at least one logical slot on the primary server."));
 			break;
 
 		case RS_INVAL_IDLE_TIMEOUT:
@@ -2041,7 +2106,8 @@ InvalidatePossiblyObsoleteSlot(uint32 possible_causes,
  * - RS_INVAL_WAL_REMOVED: requires a LSN older than the given segment
  * - RS_INVAL_HORIZON: requires a snapshot <= the given horizon in the given
  *   db; dboid may be InvalidOid for shared relations
- * - RS_INVAL_WAL_LEVEL: is logical and wal_level is insufficient
+ * - RS_INVAL_WAL_LEVEL: is logical and logical decoding is disabled due to
+ *   insufficient WAL level or no logical slot presence.
  * - RS_INVAL_IDLE_TIMEOUT: has been idle longer than the configured
  *   "idle_replication_slot_timeout" duration.
  *
@@ -2622,12 +2688,12 @@ RestoreSlotFromDisk(const char *name)
 	 */
 	if (cp.slotdata.database != InvalidOid)
 	{
-		if (wal_level < WAL_LEVEL_LOGICAL)
+		if (wal_level < WAL_LEVEL_REPLICA)
 			ereport(FATAL,
 					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-					 errmsg("logical replication slot \"%s\" exists, but \"wal_level\" < \"logical\"",
+					 errmsg("logical replication slot \"%s\" exists, but \"wal_level\" < \"replica\"",
 							NameStr(cp.slotdata.name)),
-					 errhint("Change \"wal_level\" to be \"logical\" or higher.")));
+					 errhint("Change \"wal_level\" to be \"replica\" or higher.")));
 
 		/*
 		 * In standby mode, the hot standby must be enabled. This check is

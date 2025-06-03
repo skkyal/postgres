@@ -551,9 +551,9 @@ MarkCurrentTransactionIdLoggedIfAny(void)
  * operation in a subtransaction.  We require that for logical decoding, see
  * LogicalDecodingProcessRecord.
  *
- * This returns true if wal_level >= logical and we are inside a valid
- * subtransaction, for which the assignment was not yet written to any WAL
- * record.
+ * This returns true if XLogLogicalInfoActive() is true and we are inside
+ * a valid subtransaction, for which the assignment was not yet written to
+ * any WAL record.
  */
 bool
 IsSubxactTopXidLogPending(void)
@@ -562,7 +562,7 @@ IsSubxactTopXidLogPending(void)
 	if (CurrentTransactionState->topXidLogged)
 		return false;
 
-	/* wal_level has to be logical */
+	/* effective WAL level has to be logical */
 	if (!XLogLogicalInfoActive())
 		return false;
 
@@ -681,14 +681,14 @@ AssignTransactionId(TransactionState s)
 	}
 
 	/*
-	 * When wal_level=logical, guarantee that a subtransaction's xid can only
-	 * be seen in the WAL stream if its toplevel xid has been logged before.
-	 * If necessary we log an xact_assignment record with fewer than
-	 * PGPROC_MAX_CACHED_SUBXIDS. Note that it is fine if didLogXid isn't set
-	 * for a transaction even though it appears in a WAL record, we just might
-	 * superfluously log something. That can happen when an xid is included
-	 * somewhere inside a wal record, but not in XLogRecord->xl_xid, like in
-	 * xl_standby_locks.
+	 * When XLogLogicalInfoActive() is true, guarantee that a subtransaction's
+	 * xid can only be seen in the WAL stream if its toplevel xid has been
+	 * logged before. If necessary we log an xact_assignment record with fewer
+	 * than PGPROC_MAX_CACHED_SUBXIDS. Note that it is fine if didLogXid isn't
+	 * set for a transaction even though it appears in a WAL record, we just
+	 * might superfluously log something. That can happen when an xid is
+	 * included somewhere inside a wal record, but not in XLogRecord->xl_xid,
+	 * like in xl_standby_locks.
 	 */
 	if (isSubXact && XLogLogicalInfoActive() &&
 		!TopTransactionStateData.didLogXid)

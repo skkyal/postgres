@@ -1491,7 +1491,7 @@ FinishWalRecovery(void)
 	 * 'synced' column as true after promotion as it may provide useful
 	 * information about the slot origin.
 	 */
-	ShutDownSlotSync();
+	ShutDownSlotSync(true);
 
 	/*
 	 * We are now done reading the xlog from stream. Turn off streaming

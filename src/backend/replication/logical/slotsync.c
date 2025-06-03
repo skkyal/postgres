@@ -56,6 +56,7 @@
 #include "pgstat.h"
 #include "postmaster/interrupt.h"
 #include "replication/logical.h"
+#include "replication/logicalctl.h"
 #include "replication/slotsync.h"
 #include "replication/snapbuild.h"
 #include "storage/ipc.h"
@@ -421,12 +422,12 @@ local_sync_slot_required(ReplicationSlot *local_slot, List *remote_slots)
  * drop and recreate such slots as long as these are not consumable on the
  * standby (which is the case currently).
  *
- * Note: Change of 'wal_level' on the primary server to a level lower than
- * logical may also result in slot invalidation and removal on the standby.
- * This is because such 'wal_level' change is only possible if the logical
- * slots are removed on the primary server, so it's expected to see the
- * slots being invalidated and removed on the standby too (and re-created
- * if they are re-created on the primary server).
+ * Note: Disabling logical decoding on the primary server may also result in
+ * in slot invalidation and removal on the standby. This is because logical
+ * decoding is disabled only if the logical slots are removed on the primary
+ * server (and setting 'wal_level' lower than 'logical'), so it's expected
+ * to see the slots being invalidated and removed on the standby too (and
+ * re-created if they are re-created on the primary server).
  */
 static void
 drop_local_obsolete_slots(List *remote_slot_list)
@@ -1057,13 +1058,15 @@ bool
 ValidateSlotSyncParams(int elevel)
 {
 	/*
-	 * Logical slot sync/creation requires wal_level >= logical.
+	 * Logical slot sync/creation requires logical decoding to be enabled.
 	 */
-	if (wal_level < WAL_LEVEL_LOGICAL)
+	if (!IsLogicalDecodingEnabled())
 	{
 		ereport(elevel,
 				errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				errmsg("replication slot synchronization requires \"wal_level\" >= \"logical\""));
+				errmsg("replication slot synchronization requires logical decoding to be enabled"),
+				errhint("To enable logical decoding on primary, set \"wal_level\" >= \"logical\" or create at least one logical slot when \"wal_level\" = \"replica\"."));
+
 		return false;
 	}
 
@@ -1210,11 +1213,11 @@ slotsync_worker_onexit(int code, Datum arg)
 	/*
 	 * We need to do slots cleanup here just like WalSndErrorCleanup() does.
 	 *
-	 * The startup process during promotion invokes ShutDownSlotSync() which
-	 * waits for slot sync to finish and it does that by checking the
-	 * 'syncing' flag. Thus the slot sync worker must be done with slots'
-	 * release and cleanup to avoid any dangling temporary slots or active
-	 * slots before it marks itself as finished syncing.
+	 * The startup process invokes ShutDownSlotSync() which waits for slot
+	 * sync to finish and it does that by checking the 'syncing' flag. Thus
+	 * the slot sync worker must be done with slots' release and cleanup to
+	 * avoid any dangling temporary slots or active slots before it marks
+	 * itself as finished syncing.
 	 */
 
 	/* Make sure active replication slots are released */
@@ -1317,7 +1320,7 @@ check_and_set_sync_info(pid_t worker_pid)
 
 	/*
 	 * Advertise the required PID so that the startup process can kill the
-	 * slot sync worker on promotion.
+	 * slot sync worker on promotion or when logical decoding got disabled.
 	 */
 	SlotSyncCtx->pid = worker_pid;
 
@@ -1422,6 +1425,18 @@ ReplSlotSyncWorkerMain(const void *startup_data, size_t startup_data_len)
 
 	/* Register it as soon as SlotSyncCtx->pid is initialized. */
 	before_shmem_exit(slotsync_worker_onexit, (Datum) 0);
+
+	/*
+	 * Recheck the logical decoding status in case where the slotsync worker
+	 * is launched while the postmaster has not noticed that logical decoding
+	 * is disabled.
+	 */
+	if (!IsLogicalDecodingEnabled())
+	{
+		ereport(LOG,
+				(errmsg("replication slot synchronization will shut down because logical decoding is disabled")));
+		proc_exit(0);
+	}
 
 	/*
 	 * Establishes SIGALRM handler and initialize timeout module. It is needed
@@ -1574,15 +1589,19 @@ update_synced_slots_inactive_since(void)
  * This function sends signal to shutdown slot sync worker, if required. It
  * also waits till the slot sync worker has exited or
  * pg_sync_replication_slots() has finished.
+ *
+ * If permanent is true, it also sets stopSignaled, disabling the slot sync
+ * functionality until the next server restart.
  */
 void
-ShutDownSlotSync(void)
+ShutDownSlotSync(bool permanent)
 {
 	pid_t		worker_pid;
 
 	SpinLockAcquire(&SlotSyncCtx->mutex);
 
-	SlotSyncCtx->stopSignaled = true;
+	if (permanent)
+		SlotSyncCtx->stopSignaled = true;
 
 	/*
 	 * Return if neither the slot sync worker is running nor the function

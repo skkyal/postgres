@@ -2294,7 +2294,7 @@ ExecuteTruncateGuts(List *explicit_rels,
 		xl_heap_truncate xlrec;
 		int			i = 0;
 
-		/* should only get here if wal_level >= logical */
+		/* should only get here if effective WAL level is 'logical' */
 		Assert(XLogLogicalInfoActive());
 
 		logrelids = palloc(list_length(relids_logged) * sizeof(Oid));

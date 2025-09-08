@@ -229,13 +229,35 @@ pg_drop_replication_slot(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Map a SlotSyncSkipReason enum to a human-readable string
+ */
+static char *
+GetSlotSyncSkipReason(SlotSyncSkipReason reason)
+{
+	switch (reason)
+	{
+		case SS_SKIP_NONE:
+			return "none";
+		case SS_SKIP_REMOTE_BEHIND:
+			return "remote_behind";
+		case SS_SKIP_MISSING_WAL_RECORD:
+			return "missing_wal_record";
+		case SS_SKIP_NO_CONSISTENT_SNAPSHOT:
+			return "no_consistent_snapshot";
+	}
+
+	Assert(false);
+	return "none";
+}
+
+/*
  * pg_get_replication_slots - SQL SRF showing all replication slots
  * that currently exist on the database cluster.
  */
 Datum
 pg_get_replication_slots(PG_FUNCTION_ARGS)
 {
-#define PG_GET_REPLICATION_SLOTS_COLS 20
+#define PG_GET_REPLICATION_SLOTS_COLS 21
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	XLogRecPtr	currlsn;
 	int			slotno;
@@ -442,6 +464,8 @@ pg_get_replication_slots(PG_FUNCTION_ARGS)
 		values[i++] = BoolGetDatum(slot_contents.data.failover);
 
 		values[i++] = BoolGetDatum(slot_contents.data.synced);
+
+		values[i++] = CStringGetTextDatum(GetSlotSyncSkipReason(slot_contents.slot_sync_skip_reason));
 
 		Assert(i == PG_GET_REPLICATION_SLOTS_COLS);
 

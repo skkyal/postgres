@@ -72,6 +72,21 @@ typedef enum ReplicationSlotInvalidationCause
 #define	RS_INVAL_MAX_CAUSES 4
 
 /*
+ * When slot sync worker is running or pg_sync_replication_slots is run, the
+ * slot sync can be skipped. This enum keeps a list of reasons of slot sync
+ * skip.
+ */
+typedef enum SlotSyncSkipReason
+{
+	SS_SKIP_NONE,				/* No skip */
+	SS_SKIP_MISSING_WAL_RECORD, /* Standby did not flush the wal coresponding
+								 * to confirmed flush on remote slot */
+	SS_SKIP_REMOTE_BEHIND,		/* Remote slot is behind the local slot */
+	SS_SKIP_NO_CONSISTENT_SNAPSHOT	/* Standby could not build a consistent
+									 * snapshot */
+} SlotSyncSkipReason;
+
+/*
  * On-Disk data of a replication slot, preserved across restarts.
  */
 typedef struct ReplicationSlotPersistentData
@@ -248,6 +263,9 @@ typedef struct ReplicationSlot
 	 * position.
 	 */
 	XLogRecPtr	last_saved_restart_lsn;
+
+	/* The reason for last slot sync skip */
+	SlotSyncSkipReason slot_sync_skip_reason;
 
 } ReplicationSlot;
 

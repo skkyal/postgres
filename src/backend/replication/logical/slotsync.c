@@ -148,6 +148,24 @@ typedef struct RemoteSlot
 static void slotsync_failure_callback(int code, Datum arg);
 static void update_synced_slots_inactive_since(void);
 
+/* Update slot sync skip stats */
+static void
+update_slot_sync_skip_stats(ReplicationSlot *slot, SlotSyncSkipReason skip_reason)
+{
+	/*
+	 * Update the slot sync related stats in pg_stat_replication_slot when a
+	 * slot sync is skipped
+	 */
+	if (skip_reason != SS_SKIP_NONE)
+		pgstat_report_replslot_sync_skip(slot);
+
+	/* Update the slot sync reason */
+	SpinLockAcquire(&slot->mutex);
+	if (slot->slot_sync_skip_reason != skip_reason)
+		slot->slot_sync_skip_reason = skip_reason;
+	SpinLockRelease(&slot->mutex);
+}
+
 /*
  * If necessary, update the local synced slot's metadata based on the data
  * from the remote slot.
@@ -217,6 +235,8 @@ update_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid,
 						  remote_slot->catalog_xmin,
 						  LSN_FORMAT_ARGS(slot->data.restart_lsn),
 						  slot->data.catalog_xmin));
+
+		update_slot_sync_skip_stats(slot, SS_SKIP_REMOTE_BEHIND);
 
 		if (remote_slot_precedes)
 			*remote_slot_precedes = true;
@@ -336,6 +356,15 @@ update_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid,
 		ReplicationSlotsComputeRequiredXmin(false);
 		ReplicationSlotsComputeRequiredLSN();
 	}
+
+	/*
+	 * If found_consistent_snapshot is not NULL and a consistent snapshot is
+	 * found set the slot sync skip reason to none. Else, if consistent
+	 * snapshot is not found the stats will be updated in the function
+	 * update_and_persist_local_synced_slot
+	 */
+	if (!found_consistent_snapshot || *found_consistent_snapshot)
+		update_slot_sync_skip_stats(slot, SS_SKIP_NONE);
 
 	return updated_config || updated_xmin_or_lsn;
 }
@@ -580,6 +609,9 @@ update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 		 * current location when recreating the slot in the next cycle. It may
 		 * take more time to create such a slot. Therefore, we keep this slot
 		 * and attempt the synchronization in the next cycle.
+		 *
+		 * We do not need to update the slot sync skip stats here as it will
+		 * be already updated in function update_local_synced_slot.
 		 */
 		return false;
 	}
@@ -595,11 +627,21 @@ update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 				errdetail("Synchronization could lead to data loss, because the standby could not build a consistent snapshot to decode WALs at LSN %X/%08X.",
 						  LSN_FORMAT_ARGS(slot->data.restart_lsn)));
 
+		/*
+		 * If a consitent snapshot is not found, update the slot sync skip
+		 * stats
+		 */
+		update_slot_sync_skip_stats(slot, SS_SKIP_NO_CONSISTENT_SNAPSHOT);
+
 		return false;
 	}
 
 	ReplicationSlotPersist();
 
+	/*
+	 * For the success case we do not update the slot sync skip stats here as
+	 * it is already be updated in update_local_synced_slot.
+	 */
 	ereport(LOG,
 			errmsg("newly created replication slot \"%s\" is sync-ready now",
 				   remote_slot->name));
@@ -623,7 +665,7 @@ update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 static bool
 synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 {
-	ReplicationSlot *slot;
+	ReplicationSlot *slot = NULL;
 	XLogRecPtr	latestFlushPtr;
 	bool		slot_updated = false;
 
@@ -634,6 +676,19 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 	latestFlushPtr = GetStandbyFlushRecPtr(NULL);
 	if (remote_slot->confirmed_lsn > latestFlushPtr)
 	{
+		/* If slot is present on the local, update the slot sync skip stats */
+		if ((slot = SearchNamedReplicationSlot(remote_slot->name, true)))
+		{
+			bool		synced;
+
+			SpinLockAcquire(&slot->mutex);
+			synced = slot->data.synced;
+			SpinLockRelease(&slot->mutex);
+
+			if (synced)
+				update_slot_sync_skip_stats(slot, SS_SKIP_MISSING_WAL_RECORD);
+		}
+
 		/*
 		 * Can get here only if GUC 'synchronized_standby_slots' on the
 		 * primary server was not configured correctly.
@@ -650,7 +705,7 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 	}
 
 	/* Search for the named slot */
-	if ((slot = SearchNamedReplicationSlot(remote_slot->name, true)))
+	if (slot || (slot = SearchNamedReplicationSlot(remote_slot->name, true)))
 	{
 		bool		synced;
 

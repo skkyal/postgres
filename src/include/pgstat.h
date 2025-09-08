@@ -396,6 +396,8 @@ typedef struct PgStat_StatReplSlotEntry
 	PgStat_Counter stream_bytes;
 	PgStat_Counter total_txns;
 	PgStat_Counter total_bytes;
+	PgStat_Counter slot_sync_skip_count;
+	TimestampTz last_slot_sync_skip;
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatReplSlotEntry;
 
@@ -737,6 +739,7 @@ extern PgStat_TableStatus *find_tabstat_entry(Oid rel_id);
 extern void pgstat_reset_replslot(const char *name);
 struct ReplicationSlot;
 extern void pgstat_report_replslot(struct ReplicationSlot *slot, const PgStat_StatReplSlotEntry *repSlotStat);
+extern void pgstat_report_replslot_sync_skip(struct ReplicationSlot *slot);
 extern void pgstat_create_replslot(struct ReplicationSlot *slot);
 extern void pgstat_acquire_replslot(struct ReplicationSlot *slot);
 extern void pgstat_drop_replslot(struct ReplicationSlot *slot);

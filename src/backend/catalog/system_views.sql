@@ -1046,7 +1046,8 @@ CREATE VIEW pg_replication_slots AS
             L.conflicting,
             L.invalidation_reason,
             L.failover,
-            L.synced
+            L.synced,
+            L.slot_sync_skip_reason
     FROM pg_get_replication_slots() AS L
             LEFT JOIN pg_database D ON (L.datoid = D.oid);
 
@@ -1061,6 +1062,8 @@ CREATE VIEW pg_stat_replication_slots AS
             s.stream_bytes,
             s.total_txns,
             s.total_bytes,
+            s.slot_sync_skip_count,
+            s.last_slot_sync_skip,
             s.stats_reset
     FROM pg_replication_slots as r,
         LATERAL pg_stat_get_replication_slot(slot_name) as s

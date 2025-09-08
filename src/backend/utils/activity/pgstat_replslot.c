@@ -102,6 +102,31 @@ pgstat_report_replslot(ReplicationSlot *slot, const PgStat_StatReplSlotEntry *re
 }
 
 /*
+ * Report replication slot sync skip statistics.
+ *
+ * We can rely on the stats for the slot to exist and to belong to this
+ * slot. We can only get here if pgstat_create_replslot() or
+ * pgstat_acquire_replslot() have already been called.
+ */
+void
+pgstat_report_replslot_sync_skip(ReplicationSlot *slot)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStatShared_ReplSlot *shstatent;
+	PgStat_StatReplSlotEntry *statent;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_REPLSLOT, InvalidOid,
+											ReplicationSlotIndex(slot), false);
+	shstatent = (PgStatShared_ReplSlot *) entry_ref->shared_stats;
+	statent = &shstatent->stats;
+
+	statent->slot_sync_skip_count += 1;
+	statent->last_slot_sync_skip = GetCurrentTimestamp();
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+/*
  * Report replication slot creation.
  *
  * NB: This gets called with ReplicationSlotAllocationLock already held, be

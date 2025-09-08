@@ -3036,6 +3036,14 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
       </para></entry>
      </row>
 
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+       <structfield>slot_sync_skip_reason</structfield><type>text</type>
+      </para>
+      <para>
+       Reason of the last slot synchronization skip.
+      </para></entry>
+     </row>
     </tbody>
    </tgroup>
   </table>

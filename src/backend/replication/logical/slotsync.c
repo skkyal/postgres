@@ -64,6 +64,7 @@
 #include "storage/procarray.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
+#include "utils/injection_point.h"
 #include "utils/pg_lsn.h"
 #include "utils/ps_status.h"
 #include "utils/timeout.h"
@@ -993,6 +994,10 @@ synchronize_slots(WalReceiverConn *wrconn)
 
 	if (started_tx)
 		CommitTransactionCommand();
+
+#ifdef USE_INJECTION_POINTS
+	INJECTION_POINT("slot-sync-skip", NULL);
+#endif
 
 	return some_slot_updated;
 }

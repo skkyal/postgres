@@ -3628,6 +3628,26 @@ get_namespace_name_or_temp(Oid nspid)
 		return get_namespace_name(nspid);
 }
 
+/*
+ * get_qualified_relname
+ * 	Get a palloc'd string containing the schema-qualified name of the relation
+ *  for the given namespace ID and relation name.
+ */
+char *
+get_qualified_relname(Oid nspid, char *relname)
+{
+	char	   *nspname;
+	char	   *result;
+
+	nspname = get_namespace_name_or_temp(nspid);
+	if (!nspname)
+		elog(ERROR, "cache lookup failed for namespace %u", nspid);
+
+	result = quote_qualified_identifier(nspname, relname);
+
+	return result;
+}
+
 /*				---------- PG_RANGE CACHES ----------				 */
 
 /*

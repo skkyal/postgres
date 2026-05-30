@@ -986,7 +986,42 @@ ParallelApplyWorkerMain(Datum main_arg)
 
 	set_apply_error_context_origin(originname);
 
-	LogicalParallelApplyLoop(mqh);
+	PG_TRY();
+	{
+		LogicalParallelApplyLoop(mqh);
+	}
+	PG_CATCH();
+	{
+		MemoryContext oldcontext;
+		ErrorData *edata;
+
+		/*
+		 * Copy the ErrorData before doing any further work. The error may
+		 * have been raised while running under ErrorContext, so switch to
+		 * a safe context (TopMemoryContext) to avoid assertions and ensure
+		 * the error data survives subsequent cleanup.
+		 */
+		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+		edata = CopyErrorData();
+		MemoryContextSwitchTo(oldcontext);
+
+		FlushErrorState();
+
+		/*
+		 * Reset the origin state to prevent the advancement of origin
+		 * progress if we fail to apply. Otherwise, this will result in
+		 * transaction loss as that transaction won't be sent again by the
+		 * server.
+		 */
+		replorigin_xact_clear(true);
+
+		AbortOutOfAnyTransaction();
+		ProcessPendingConflictLogTuple();
+
+		/* Re-throw the original error. */
+		ReThrowError(edata);
+	}
+	PG_END_TRY();
 
 	/*
 	 * The parallel apply worker must not get here because the parallel apply

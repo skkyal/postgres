@@ -487,7 +487,9 @@ static bool MySubscriptionValid = false;
 static List *on_commit_wakeup_workers_subids = NIL;
 
 bool		in_remote_transaction = false;
-static XLogRecPtr remote_final_lsn = InvalidXLogRecPtr;
+XLogRecPtr remote_final_lsn = InvalidXLogRecPtr;
+TransactionId	remote_xid = InvalidTransactionId;
+TimestampTz	remote_commit_ts = 0;
 
 /* fields valid only when processing streamed transaction */
 static bool in_streamed_transaction = false;
@@ -1236,6 +1238,8 @@ apply_handle_begin(StringInfo s)
 	set_apply_error_context_xact(begin_data.xid, begin_data.final_lsn);
 
 	remote_final_lsn = begin_data.final_lsn;
+	remote_commit_ts = begin_data.committime;
+	remote_xid = begin_data.xid;
 
 	maybe_start_skipping_changes(begin_data.final_lsn);
 
@@ -1766,6 +1770,10 @@ apply_handle_stream_start(StringInfo s)
 		ereport(ERROR,
 				(errcode(ERRCODE_PROTOCOL_VIOLATION),
 				 errmsg_internal("invalid transaction ID in streamed replication transaction")));
+
+	remote_xid = stream_xid;
+	remote_final_lsn = InvalidXLogRecPtr;
+	remote_commit_ts = 0;
 
 	set_apply_error_context_xact(stream_xid, InvalidXLogRecPtr);
 
@@ -2427,6 +2435,9 @@ apply_handle_stream_commit(StringInfo s)
 	switch (apply_action)
 	{
 		case TRANS_LEADER_APPLY:
+
+			/* Set remote_commit_ts for conflict logging. */
+			remote_commit_ts = commit_data.committime;
 
 			/*
 			 * The transaction has been serialized to file, so replay all the
@@ -5666,6 +5677,7 @@ start_apply(XLogRecPtr origin_startpos)
 			 */
 			AbortOutOfAnyTransaction();
 			pgstat_report_subscription_error(MySubscription->oid);
+			ProcessPendingConflictLogTuple();
 
 			PG_RE_THROW();
 		}
@@ -6039,6 +6051,8 @@ DisableSubscriptionAndExit(void)
 	 * synchronization, or apply.
 	 */
 	pgstat_report_subscription_error(MyLogicalRepWorker->subid);
+
+	ProcessPendingConflictLogTuple();
 
 	/* Disable the subscription */
 	StartTransactionCommand();

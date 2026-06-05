@@ -312,6 +312,8 @@ heap_create(const char *relname,
 	 * But allow creating indexes on relations in pg_catalog even if
 	 * allow_system_table_mods = off, upper layers already guarantee it's on a
 	 * user defined relation, not a system one.
+	 *
+	 * Allow creation of the conflict log table in binary-upgrade mode.
 	 */
 	if (!allow_system_table_mods && IsNormalProcessingMode())
 	{
@@ -323,7 +325,7 @@ heap_create(const char *relname,
 							get_qualified_objname(relnamespace, relname)),
 					 errdetail("System catalog modifications are currently disallowed.")));
 
-		if (IsConflictLogTableNamespace(relnamespace))
+		if (!IsBinaryUpgrade && IsConflictLogTableNamespace(relnamespace))
 			ereport(ERROR,
 					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
 					 errmsg("permission denied to create \"%s\"",

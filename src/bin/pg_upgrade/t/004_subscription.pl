@@ -290,7 +290,7 @@ $publisher->safe_psql(
 $old_sub->safe_psql(
 	'postgres', qq[
 		CREATE TABLE tab_upgraded2(id int);
-		CREATE SUBSCRIPTION regress_sub5 CONNECTION '$connstr' PUBLICATION regress_pub5;
+		CREATE SUBSCRIPTION regress_sub5 CONNECTION '$connstr' PUBLICATION regress_pub5 with (conflict_log_destination = 'table');
 ]);
 
 # The table tab_upgraded2 will be in the init state as the subscriber's
@@ -312,7 +312,10 @@ my $tab_upgraded1_oid = $old_sub->safe_psql('postgres',
 	"SELECT oid FROM pg_class WHERE relname = 'tab_upgraded1'");
 my $tab_upgraded2_oid = $old_sub->safe_psql('postgres',
 	"SELECT oid FROM pg_class WHERE relname = 'tab_upgraded2'");
-
+my $sub5_oid = $old_sub->safe_psql('postgres',
+	"SELECT oid FROM pg_subscription where subname = 'regress_sub5'");
+my $sub_clt_relid = $old_sub->safe_psql('postgres',
+	"SELECT subconflictlogrelid FROM pg_subscription WHERE subname = 'regress_sub5'");
 $old_sub->stop;
 
 # Change configuration so that initial table sync does not get started
@@ -393,6 +396,13 @@ $result = $new_sub->safe_psql('postgres',
 	"SELECT xmin IS NOT NULL from pg_replication_slots WHERE slot_name = 'pg_conflict_detection'"
 );
 is($result, qq(t), "conflict detection slot exists");
+
+# The subscription oid and the subscription conflict log table relid should be preserved
+$result = $new_sub->safe_psql('postgres', "SELECT oid FROM pg_subscription WHERE subname = 'regress_sub5'");
+is($result, qq($sub5_oid), "subscription oid should have been preserved");
+
+$result = $new_sub->safe_psql('postgres', "SELECT subconflictlogrelid FROM pg_subscription WHERE subname = 'regress_sub5'");
+is($result, qq($sub_clt_relid), "subscription conflict log table relid should have been preserved");
 
 # Resume the initial sync and wait until all tables of subscription
 # 'regress_sub5' are synchronized

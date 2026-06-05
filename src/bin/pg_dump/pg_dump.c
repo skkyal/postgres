@@ -1981,6 +1981,8 @@ checkExtensionMembership(DumpableObject *dobj, Archive *fout)
 static void
 selectDumpableNamespace(NamespaceInfo *nsinfo, Archive *fout)
 {
+	DumpOptions *dopt = fout->dopt;
+
 	/*
 	 * DUMP_COMPONENT_DEFINITION typically implies a CREATE SCHEMA statement
 	 * and (for --clean) a DROP SCHEMA statement.  (In the absence of
@@ -2009,6 +2011,32 @@ selectDumpableNamespace(NamespaceInfo *nsinfo, Archive *fout)
 		 * initdb time, see pg_init_privs).
 		 */
 		nsinfo->dobj.dump_contains = nsinfo->dobj.dump = DUMP_COMPONENT_ACL;
+	}
+	else if (strcmp(nsinfo->dobj.name, "pg_conflict") == 0)
+	{
+		if (dopt->binary_upgrade)
+		{
+			/*
+			 * The pg_conflict schema is a strange beast that sits in a sort
+			 * of no-mans-land between being a system object and a user
+			 * object. CREATE SCHEMA would fail, so its
+			 * DUMP_COMPONENT_DEFINITION is just a comment.
+			 */
+			nsinfo->create = false;
+			nsinfo->dobj.dump = DUMP_COMPONENT_ALL;
+			nsinfo->dobj.dump &= ~DUMP_COMPONENT_DEFINITION;
+			nsinfo->dobj.dump_contains = DUMP_COMPONENT_ALL;
+
+			/*
+			 * Also, make like it has a comment even if it doesn't; this is so
+			 * that we'll emit a command to drop the comment, if appropriate.
+			 * (Without this, we'd not call dumpCommentExtended for it.)
+			 */
+			nsinfo->dobj.components |= DUMP_COMPONENT_COMMENT;
+		}
+		else
+			nsinfo->dobj.dump_contains = nsinfo->dobj.dump =
+				DUMP_COMPONENT_NONE;
 	}
 	else if (strncmp(nsinfo->dobj.name, "pg_", 3) == 0 ||
 			 strcmp(nsinfo->dobj.name, "information_schema") == 0)
@@ -2067,8 +2095,37 @@ selectDumpableNamespace(NamespaceInfo *nsinfo, Archive *fout)
 static void
 selectDumpableTable(TableInfo *tbinfo, Archive *fout)
 {
+	DumpOptions *dopt = fout->dopt;
+
 	if (checkExtensionMembership(&tbinfo->dobj, fout))
 		return;					/* extension membership overrides all else */
+
+	if (strcmp(tbinfo->dobj.namespace->dobj.name, "pg_conflict") == 0)
+	{
+		/*
+		 * Dump pg_conflict tables only during binary upgrade. The schema is
+		 * assumed to already exist.
+		 */
+		if (dopt->binary_upgrade)
+		{
+			tbinfo->dobj.dump = DUMP_COMPONENT_DEFINITION;
+
+			/*
+			 * Suppress the "ALTER TABLE ... OWNER TO ..." command for this
+			 * table. This prevents pg_dump from outputting the owner change.
+			 */
+			tbinfo->rolname = NULL;
+		}
+		else
+			tbinfo->dobj.dump = DUMP_COMPONENT_NONE;
+
+		/*
+		 * Do not apply table selection or exclusion rules to pg_conflict
+		 * tables. During binary upgrade, these tables are dumped to preserve
+		 * catalog state; otherwise, they are not dumped at all.
+		 */
+		return;
+	}
 
 	/*
 	 * If specific tables are being dumped, dump just those tables; else, dump
@@ -5184,6 +5241,8 @@ getSubscriptions(Archive *fout)
 	int			i_subfailover;
 	int			i_subretaindeadtuples;
 	int			i_submaxretention;
+	int			i_subconflictlogrelid;
+	int			i_sublogdestination;
 	int			i,
 				ntups;
 
@@ -5282,9 +5341,16 @@ getSubscriptions(Archive *fout)
 							 " '-1' AS subwalrcvtimeout,\n");
 
 	if (fout->remoteVersion >= 190000)
-		appendPQExpBufferStr(query, " fs.srvname AS subservername\n");
+		appendPQExpBufferStr(query, " fs.srvname AS subservername,\n");
 	else
-		appendPQExpBufferStr(query, " NULL AS subservername\n");
+		appendPQExpBufferStr(query, " NULL AS subservername,\n");
+
+	if (fout->remoteVersion >= 190000)
+		appendPQExpBufferStr(query,
+							 " s.subconflictlogrelid, s.subconflictlogdest\n");
+	else
+		appendPQExpBufferStr(query,
+							 " NULL AS subconflictlogrelid, NULL AS subconflictlogdest\n");
 
 	appendPQExpBufferStr(query,
 						 "FROM pg_subscription s\n");
@@ -5333,6 +5399,8 @@ getSubscriptions(Archive *fout)
 	i_subpublications = PQfnumber(res, "subpublications");
 	i_suborigin = PQfnumber(res, "suborigin");
 	i_suboriginremotelsn = PQfnumber(res, "suboriginremotelsn");
+	i_subconflictlogrelid = PQfnumber(res, "subconflictlogrelid");
+	i_sublogdestination = PQfnumber(res, "subconflictlogdest");
 
 	subinfo = pg_malloc_array(SubscriptionInfo, ntups);
 
@@ -5390,6 +5458,32 @@ getSubscriptions(Archive *fout)
 		else
 			subinfo[i].suboriginremotelsn =
 				pg_strdup(PQgetvalue(res, i, i_suboriginremotelsn));
+
+		if (PQgetisnull(res, i, i_subconflictlogrelid))
+			subinfo[i].subconflictlogrelid = InvalidOid;
+		else
+		{
+			subinfo[i].subconflictlogrelid =
+				atooid(PQgetvalue(res, i, i_subconflictlogrelid));
+
+			if (subinfo[i].subconflictlogrelid)
+			{
+				TableInfo  *tableInfo;
+
+				tableInfo = findTableByOid(subinfo[i].subconflictlogrelid);
+				if (!tableInfo)
+					pg_fatal("could not find conflict log table with OID %u",
+							 subinfo[i].subconflictlogrelid);
+
+				addObjectDependency(&subinfo[i].dobj, tableInfo->dobj.dumpId);
+			}
+		}
+
+		if (PQgetisnull(res, i, i_sublogdestination))
+			subinfo[i].subconflictlogdest = NULL;
+		else
+			subinfo[i].subconflictlogdest =
+				pg_strdup(PQgetvalue(res, i, i_sublogdestination));
 
 		/* Decide whether we want to dump it */
 		selectDumpableObject(&(subinfo[i].dobj), fout);
@@ -5583,6 +5677,14 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 	appendPQExpBuffer(delq, "DROP SUBSCRIPTION %s;\n",
 					  qsubname);
 
+	if (dopt->binary_upgrade)
+	{
+		appendPQExpBufferStr(query, "\n-- For binary upgrade, must preserve pg_subscription.oid\n");
+		appendPQExpBuffer(query,
+						  "SELECT pg_catalog.binary_upgrade_set_next_pg_subscription_oid('%u'::pg_catalog.oid);\n\n",
+						  subinfo->dobj.catId.oid);
+	}
+
 	appendPQExpBuffer(query, "CREATE SUBSCRIPTION %s ",
 					  qsubname);
 	if (subinfo->subservername)
@@ -5655,6 +5757,25 @@ dumpSubscription(Archive *fout, const SubscriptionInfo *subinfo)
 		appendPQExpBuffer(query, ", origin = %s", subinfo->suborigin);
 
 	appendPQExpBufferStr(query, ");\n");
+
+	/*
+	 * Restore the conflict log destination separately from CREATE SUBSCRIPTION.
+	 * Setting conflict_log_destination to 'table' may create and associate
+	 * a conflict log table whose name is derived from the subscription OID.
+	 * Since the subscription must already exist before that OID is known,
+	 * emit this as a separate ALTER SUBSCRIPTION so that any required conflict
+	 * log table can be created and linked after the subscription itself has
+	 * been restored.
+	 *
+	 * We skip the default value ('log') to match the handling of other
+	 * default subscription options.
+	 */
+	if (subinfo->subconflictlogdest &&
+		(pg_strcasecmp(subinfo->subconflictlogdest, "log") != 0))
+		appendPQExpBuffer(query,
+						  "\n\nALTER SUBSCRIPTION %s SET (conflict_log_destination = %s);\n",
+						  qsubname,
+						  subinfo->subconflictlogdest);
 
 	/*
 	 * In binary-upgrade mode, we allow the replication to continue after the

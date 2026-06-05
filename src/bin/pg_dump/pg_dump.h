@@ -722,6 +722,7 @@ typedef struct _SubscriptionInfo
 	bool		subfailover;
 	bool		subretaindeadtuples;
 	int			submaxretention;
+	Oid			subconflictlogrelid;
 	char	   *subservername;
 	char	   *subconninfo;
 	char	   *subslotname;
@@ -730,6 +731,7 @@ typedef struct _SubscriptionInfo
 	char	   *subpublications;
 	char	   *suborigin;
 	char	   *suboriginremotelsn;
+	char	   *subconflictlogdest;
 } SubscriptionInfo;
 
 /*

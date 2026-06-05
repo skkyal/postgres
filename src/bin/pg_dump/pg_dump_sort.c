@@ -1132,6 +1132,19 @@ repairTableAttrDefMultiLoop(DumpableObject *tableobj,
 }
 
 /*
+ * Because we make subscriptions depend on their conflict log tables, while
+ * there is an automatic dependency in the other direction, we need to break
+ * the loop. Remove the automatic dependency, allowing the table to be created
+ * first.
+ */
+static void
+repairSubscriptionTableLoop(DumpableObject *subobj, DumpableObject *tableobj)
+{
+	/* Remove table's dependency on subscription */
+	removeObjectDependency(tableobj, subobj->dumpId);
+}
+
+/*
  * CHECK, NOT NULL constraints on domains work just like those on tables ...
  */
 static void
@@ -1358,6 +1371,24 @@ repairDependencyLoop(DumpableObject **loop,
 		((AttrDefInfo *) loop[0])->adtable == (TableInfo *) loop[1])
 	{
 		repairTableAttrDefLoop(loop[1], loop[0]);
+		return;
+	}
+
+	/*
+	 * Subscription and its Conflict Log Table
+	 */
+	if (nLoop == 2 &&
+		loop[0]->objType == DO_TABLE &&
+		loop[1]->objType == DO_SUBSCRIPTION)
+	{
+		repairSubscriptionTableLoop(loop[1], loop[0]);
+		return;
+	}
+	if (nLoop == 2 &&
+		loop[0]->objType == DO_SUBSCRIPTION &&
+		loop[1]->objType == DO_TABLE)
+	{
+		repairSubscriptionTableLoop(loop[0], loop[1]);
 		return;
 	}
 

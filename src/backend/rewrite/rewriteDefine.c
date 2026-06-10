@@ -262,6 +262,17 @@ DefineQueryRewrite(const char *rulename,
 						RelationGetRelationName(event_relation)),
 				 errdetail_relkind_not_supported(event_relation->rd_rel->relkind)));
 
+	/*
+	 * Conflict log tables are used internally for logical replication conflict
+	 * logging and should not have rules, as it could disrupt conflict logging.
+	 */
+	if (IsConflictLogTableClass(event_relation->rd_rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a conflict log table",
+						RelationGetRelationName(event_relation)),
+				 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
+
 	if (!allowSystemTableMods && IsSystemRelation(event_relation))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
@@ -771,6 +782,17 @@ RangeVarCallbackForRenameRule(const RangeVar *rv, Oid relid, Oid oldrelid,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("relation \"%s\" cannot have rules", rv->relname),
 				 errdetail_relkind_not_supported(form->relkind)));
+
+	/*
+	 * Conflict log tables are used internally for logical replication conflict
+	 * logging and should not have rules, as it could disrupt conflict logging.
+	 */
+	if (IsConflictLogTableClass(form))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a conflict log table",
+						rv->relname),
+				 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
 
 	if (!allowSystemTableMods && IsSystemClass(relid, form))
 		ereport(ERROR,

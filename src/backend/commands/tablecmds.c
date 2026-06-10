@@ -2750,6 +2750,18 @@ MergeAttributes(List *columns, const List *supers, char relpersistence,
 					 errmsg("cannot inherit from partition \"%s\"",
 							RelationGetRelationName(relation))));
 
+		/*
+		 * Conflict log tables are managed by the system for logical
+		 * replication and should not be used as parent tables, as
+		 * inheritance could interfere with the logging behavior.
+		 */
+		if (IsConflictLogTableNamespace(relation->rd_rel->relnamespace))
+			ereport(ERROR,
+					(errcode(ERRCODE_WRONG_OBJECT_TYPE),
+					 errmsg("cannot inherit from conflict log table \"%s\"",
+							RelationGetRelationName(relation)),
+					 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
+
 		if (relation->rd_rel->relkind != RELKIND_RELATION &&
 			relation->rd_rel->relkind != RELKIND_FOREIGN_TABLE &&
 			relation->rd_rel->relkind != RELKIND_PARTITIONED_TABLE)
@@ -3887,6 +3899,19 @@ renameatt_check(Oid myrelid, Form_pg_class classform, bool recursing)
 	if (!object_ownercheck(RelationRelationId, myrelid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(get_rel_relkind(myrelid)),
 					   NameStr(classform->relname));
+
+	/*
+	 * Conflict log tables are used internally for logical replication conflict
+	 * logging and should not be modified directly, as it could disrupt
+	 * conflict logging.
+	 */
+	if (IsConflictLogTableClass(classform))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a conflict log table",
+						NameStr(classform->relname)),
+				 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
+
 	if (!allowSystemTableMods && IsSystemClass(myrelid, classform))
 		ereport(ERROR,
 				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
@@ -6888,6 +6913,18 @@ ATSimplePermissions(AlterTableType cmdtype, Relation rel, int allowed_targets)
 	if (!object_ownercheck(RelationRelationId, RelationGetRelid(rel), GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(rel->rd_rel->relkind),
 					   RelationGetRelationName(rel));
+
+	/*
+	 * Conflict log tables are used internally for logical replication conflict
+	 * logging and should not be altered directly, as it could disrupt conflict
+	 * logging.
+	 */
+	if (IsConflictLogTableClass(rel->rd_rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a conflict log table",
+						RelationGetRelationName(rel)),
+				 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
 
 	if (!allowSystemTableMods && IsSystemRelation(rel))
 		ereport(ERROR,
@@ -10197,6 +10234,18 @@ ATAddForeignKeyConstraint(List **wqueue, AlteredTableInfo *tab, Relation rel,
 				(errcode(ERRCODE_WRONG_OBJECT_TYPE),
 				 errmsg("referenced relation \"%s\" is not a table",
 						RelationGetRelationName(pkrel))));
+
+	/*
+	 * Conflict log tables are used internally for logical replication conflict
+	 * logging and should not be referenced by foreign keys, as it could
+	 * disrupt conflict logging.
+	 */
+	if (IsConflictLogTableClass(pkrel->rd_rel))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a conflict log table",
+						RelationGetRelationName(pkrel)),
+				 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
 
 	if (!allowSystemTableMods && IsSystemRelation(pkrel))
 		ereport(ERROR,
@@ -19818,6 +19867,18 @@ RangeVarCallbackOwnsRelation(const RangeVar *relation,
 		aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(get_rel_relkind(relId)),
 					   relation->relname);
 
+	/*
+	 * Conflict log tables are used internally for logical replication conflict
+	 * logging and should not be modified directly, as it could disrupt
+	 * conflict logging.
+	 */
+	if (IsConflictLogTableClass((Form_pg_class) GETSTRUCT(tuple)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a conflict log table",
+						relation->relname),
+				 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
+
 	if (!allowSystemTableMods &&
 		IsSystemClass(relId, (Form_pg_class) GETSTRUCT(tuple)))
 		ereport(ERROR,
@@ -19852,6 +19913,18 @@ RangeVarCallbackForAlterRelation(const RangeVar *rv, Oid relid, Oid oldrelid,
 	/* Must own relation. */
 	if (!object_ownercheck(RelationRelationId, relid, GetUserId()))
 		aclcheck_error(ACLCHECK_NOT_OWNER, get_relkind_objtype(get_rel_relkind(relid)), rv->relname);
+
+	/*
+	 * Conflict log tables are used internally for logical replication conflict
+	 * logging and should not be altered directly, as it could disrupt conflict
+	 * logging.
+	 */
+	if (IsConflictLogTableClass(classform))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a conflict log table",
+						rv->relname),
+				 errdetail("Conflict log tables are system-managed tables for logical replication conflicts.")));
 
 	/* No system table modifications unless explicitly allowed. */
 	if (!allowSystemTableMods && IsSystemClass(relid, classform))

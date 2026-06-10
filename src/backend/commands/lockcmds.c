@@ -16,6 +16,7 @@
 
 #include "access/table.h"
 #include "access/xact.h"
+#include "catalog/catalog.h"
 #include "catalog/namespace.h"
 #include "catalog/pg_inherits.h"
 #include "commands/lockcmds.h"
@@ -91,6 +92,17 @@ RangeVarCallbackForLockTable(const RangeVar *rv, Oid relid, Oid oldrelid,
 				 errmsg("cannot lock relation \"%s\"",
 						rv->relname),
 				 errdetail_relkind_not_supported(relkind)));
+
+	/*
+	 * Conflict log tables are managed by the system for logical replication
+	 * and should not be locked explicitly.
+	 */
+	if (IsConflictLogTableNamespace(get_rel_namespace(relid)))
+		ereport(ERROR,
+				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				 errmsg("permission denied: \"%s\" is a conflict log table",
+						rv->relname),
+				 errdetail("Conflict log tables are managed by the system for logical replication.")));
 
 	/*
 	 * Make note if a temporary relation has been accessed in this
@@ -196,6 +208,13 @@ LockViewRecurse_walker(Node *node, LockViewRecurse_context *context)
 			/* Currently, we only allow plain tables or views to be locked. */
 			if (relkind != RELKIND_RELATION && relkind != RELKIND_PARTITIONED_TABLE &&
 				relkind != RELKIND_VIEW)
+				continue;
+
+			/*
+			 * Conflict log tables are managed by the system for logical
+			 * replication and should not be locked explicitly.
+			 */
+			if (IsConflictLogTableNamespace(get_rel_namespace(relid)))
 				continue;
 
 			/*

@@ -305,23 +305,31 @@ heap_create(const char *relname,
 	Assert(OidIsValid(relid));
 
 	/*
-	 * Don't allow creating relations in pg_catalog directly, even though it
-	 * is allowed to move user defined relations there. Semantics with search
-	 * paths including pg_catalog are too confusing for now.
+	 * Don't allow creating relations in pg_catalog or pg_conflict directly,
+	 * even though it is allowed to move user defined relations there. Semantics
+	 * with search paths including pg_catalog are too confusing for now.
 	 *
 	 * But allow creating indexes on relations in pg_catalog even if
 	 * allow_system_table_mods = off, upper layers already guarantee it's on a
 	 * user defined relation, not a system one.
 	 */
-	if (!allow_system_table_mods &&
-		((IsCatalogNamespace(relnamespace) && relkind != RELKIND_INDEX) ||
-		 IsToastNamespace(relnamespace)) &&
-		IsNormalProcessingMode())
-		ereport(ERROR,
-				(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-				 errmsg("permission denied to create \"%s.%s\"",
-						get_namespace_name(relnamespace), relname),
-				 errdetail("System catalog modifications are currently disallowed.")));
+	if (!allow_system_table_mods && IsNormalProcessingMode())
+	{
+		if ((IsCatalogNamespace(relnamespace) && relkind != RELKIND_INDEX) ||
+			IsToastNamespace(relnamespace))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to create \"%s\"",
+							get_qualified_objname(relnamespace, relname)),
+					 errdetail("System catalog modifications are currently disallowed.")));
+
+		if (IsConflictLogTableNamespace(relnamespace))
+			ereport(ERROR,
+					(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+					 errmsg("permission denied to create \"%s\"",
+							get_qualified_objname(relnamespace, relname)),
+					 errdetail("Conflict schema modifications are currently disallowed.")));
+	}
 
 	*relfrozenxid = InvalidTransactionId;
 	*relminmxid = InvalidMultiXactId;
